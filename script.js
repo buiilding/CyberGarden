@@ -5442,6 +5442,21 @@ function createPageReferencePicker({ editor, menu, getPages, onChange, onOpen })
   return { close };
 }
 
+// src/editor-auth.js
+async function readEditorSession(request = fetch) {
+  try {
+    const response = await request("/auth/session", { credentials: "same-origin", cache: "no-store" });
+    if (!response.ok) return null;
+    const session = await response.json();
+    return session.authenticated === true && typeof session.csrf === "string" && session.csrf ? session : null;
+  } catch {
+    return null;
+  }
+}
+function editorPath(path) {
+  return /^\/editor(?:\/[A-Za-z0-9_-]+)?\/?$/.test(path);
+}
+
 // src/app.js
 var $2 = (selector) => document.querySelector(selector);
 var body = $2("#writing-body");
@@ -5452,6 +5467,8 @@ var urls = /* @__PURE__ */ new Map();
 var HOME_ID = "__garden_home__";
 var homeEntry;
 var pageReferencePicker;
+var editorAuthorized = false;
+var routeRevision = 0;
 var db;
 var activeId;
 var savedRange;
@@ -5645,13 +5662,13 @@ ${kind === "youtube" ? ref : kind === "image" ? `![${label}](${ref})` : `[Video:
   }
 });
 function saveEditor() {
-  if (!activeId || activeId === deletingId || $2("#editor-shell").hidden) return;
+  if (!editorAuthorized || !activeId || activeId === deletingId || $2("#editor-shell")?.hidden) return;
   ensureTrailingTextLine(body);
   const entry = currentEntry();
   entry.title = titleInput.value;
   entry.markdown = turndown.turndown(editorContentHTML(body));
   if (activeId !== HOME_ID) document.querySelector(`#editor-pages a[data-id="${activeId}"]`).textContent = titleFor(entry);
-  persist(entry);
+  return persist(entry);
 }
 function removeMedia(media) {
   const target = caretTargetBesideMedia(media);
@@ -5661,10 +5678,12 @@ function removeMedia(media) {
   saveEditor();
 }
 function renderNavigation() {
-  if (activeId === HOME_ID) $2("#editor-home").setAttribute("aria-current", "page");
-  else $2("#editor-home").removeAttribute("aria-current");
-  $2("#import-markdown").textContent = activeId === HOME_ID ? "Import Home Markdown\u2026" : "Import Markdown\u2026";
-  $2("#editor-pages").replaceChildren();
+  if (body) {
+    if (activeId === HOME_ID) $2("#editor-home").setAttribute("aria-current", "page");
+    else $2("#editor-home").removeAttribute("aria-current");
+    $2("#import-markdown").textContent = activeId === HOME_ID ? "Import Home Markdown\u2026" : "Import Markdown\u2026";
+    $2("#editor-pages").replaceChildren();
+  }
   $2(".page-shelf nav").replaceChildren();
   $2(".all-pages").replaceChildren();
   for (const entry of entries2.values()) {
@@ -5673,7 +5692,7 @@ function renderNavigation() {
     link.dataset.id = entry.id;
     link.textContent = titleFor(entry);
     if (activeId === entry.id) link.setAttribute("aria-current", "page");
-    $2("#editor-pages").append(link);
+    $2("#editor-pages")?.append(link);
     const publicLink = document.createElement("a");
     publicLink.href = `/page/${entry.id}`;
     publicLink.dataset.page = entry.id;
@@ -5700,20 +5719,53 @@ function migrateLegacyURL() {
   }
   return false;
 }
-function route(focus = false) {
+async function checkEditorAccess() {
+  const session = await readEditorSession();
+  if (session) $2("#sign-out-csrf").value = session.csrf;
+  return !!session;
+}
+function lockEditor() {
+  editorAuthorized = false;
+  if (body) {
+    $2("#editor-shell").hidden = true;
+    body.contentEditable = "false";
+    titleInput.disabled = true;
+  }
+  pageReferencePicker?.close();
+  unmountYouTubePlayers();
+  body?.querySelectorAll("video").forEach((video) => video.pause());
+  location.replace(`/auth/login?next=${encodeURIComponent(gardenPath(location.pathname) || "/editor")}`);
+}
+async function route(focus = false) {
+  const revision2 = ++routeRevision;
+  const path = gardenPath(location.pathname) || "/";
+  const editing = editorPath(path);
+  if (editing !== !!body) {
+    location.replace(path + location.search);
+    return;
+  }
+  if (editing) {
+    editorAuthorized = false;
+    $2("#editor-shell").hidden = true;
+    const allowed = await checkEditorAccess();
+    if (revision2 !== routeRevision) return;
+    if (!allowed) {
+      lockEditor();
+      return;
+    }
+    editorAuthorized = true;
+  }
   pageReferencePicker?.close();
   closeWritingMenu();
   closeBlockMenu();
   unmountYouTubePlayers();
   document.querySelectorAll('[data-media-kind="youtube"] iframe').forEach((player) => player.remove());
-  body.querySelectorAll("video").forEach((video) => video.pause());
+  body?.querySelectorAll("video").forEach((video) => video.pause());
   $2("#page-content").querySelectorAll("video").forEach((video) => video.pause());
   $2("#home-content").querySelectorAll("video").forEach((video) => video.pause());
-  const path = gardenPath(location.pathname) || "/";
-  const editing = /^\/editor(?:\/|$)/.test(path);
   const id = editing ? path.slice(8) : path.startsWith("/page/") ? path.slice(6) : "";
   $2(".site").hidden = editing;
-  $2("#editor-shell").hidden = !editing;
+  if (body) $2("#editor-shell").hidden = !editing;
   if (editing) {
     activeId = !id || id === "home" ? HOME_ID : entries2.has(id) ? id : entries2.keys().next().value || HOME_ID;
     const entry = currentEntry();
@@ -5794,7 +5846,7 @@ function syncBlockFormat() {
 }
 function closeBlockMenu(returnFocus = false) {
   const menu = $2("#block-format-menu");
-  if (menu.hidden) return;
+  if (!menu || menu.hidden) return;
   menu.hidden = true;
   $2("#block-format").setAttribute("aria-expanded", "false");
   if (returnFocus) $2("#block-format").focus({ preventScroll: true });
@@ -5812,7 +5864,7 @@ function showBlockMenu(edge) {
 }
 function closeWritingMenu(returnFocus = false) {
   const menu = $2("#writing-menu");
-  if (menu.hidden) return;
+  if (!menu || menu.hidden) return;
   menu.hidden = true;
   if (returnFocus) restoreSelection();
 }
@@ -5916,6 +5968,7 @@ function showInsert(mode) {
   $2("#insert-url").focus();
 }
 async function addFiles(files, kind) {
+  if (!editorAuthorized) return;
   const owner = activeId;
   rememberSelection();
   for (const file of files) {
@@ -5988,14 +6041,17 @@ ${missing.join("\n")}
   }
 }
 async function createEntry(title = "", markdown = "") {
+  if (!editorAuthorized) return;
   const entry = { id: crypto.randomUUID(), title, markdown, related: entries2.keys().next().value, order: Math.max(-1, ...[...entries2.values()].map((item) => item.order ?? 0)) + 1 };
   entries2.set(entry.id, entry);
   history.pushState(null, "", `/editor/${entry.id}`);
-  route(true);
+  await route(true);
+  if (!editorAuthorized) return;
   titleInput.focus();
   await persist(entry);
 }
 async function deleteCurrentEntry() {
+  if (!editorAuthorized) return;
   const id = activeId;
   if (!id || id === HOME_ID || !entries2.has(id) || deletingId) return;
   deletingId = id;
@@ -6007,7 +6063,7 @@ async function deleteCurrentEntry() {
     if (activeId === id) {
       const nextId = entries2.keys().next().value;
       history.replaceState(null, "", nextId ? `/editor/${nextId}` : "/editor");
-      route(true);
+      await route(true);
     } else if ($2("#editor-shell").hidden) route();
     else renderNavigation();
   } catch {
@@ -6019,7 +6075,7 @@ async function deleteCurrentEntry() {
   }
 }
 async function importFile(file) {
-  if (!file) return;
+  if (!file || !editorAuthorized) return;
   const importingHome = activeId === HOME_ID;
   if (file.size > 100 * 1024 * 1024) {
     notice("Choose a Markdown file or garden ZIP smaller than 100 MB.", true);
@@ -6069,7 +6125,7 @@ async function importFile(file) {
       homeEntry = { ...homeEntry, title, markdown };
       await persist(homeEntry);
       history.pushState(null, "", "/editor/home");
-      route(true);
+      await route(true);
       notice("Home imported.");
     } else {
       await createEntry(title, markdown);
@@ -6080,6 +6136,39 @@ async function importFile(file) {
   }
 }
 function bindEvents() {
+  window.addEventListener("popstate", () => {
+    migrateLegacyURL();
+    route(true);
+  });
+  window.addEventListener("hashchange", () => {
+    if (migrateLegacyURL()) route(true);
+  });
+  document.addEventListener("click", (event) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = event.target.closest("a[href]");
+    if (!link || link.hasAttribute("download") || link.target && link.target !== "_self") return;
+    if (link.classList.contains("skip-link")) {
+      event.preventDefault();
+      (body && !$2("#editor-shell").hidden ? body : $2("#main")).focus();
+      return;
+    }
+    const url = new URL(link.href, location.href);
+    if (url.origin !== location.origin || url.hash || !gardenPath(url.pathname)) return;
+    event.preventDefault();
+    if (editorPath(url.pathname) !== !!body) {
+      location.assign(url.pathname + url.search);
+      return;
+    }
+    if (url.pathname !== location.pathname || url.search !== location.search || location.hash) history.pushState(null, "", url.pathname + url.search);
+    route(true);
+  });
+  window.addEventListener("beforeunload", (event) => {
+    if (pendingWrites || saveFailed) {
+      event.preventDefault();
+      event.returnValue = "";
+    }
+  });
+  if (!body) return;
   document.execCommand("defaultParagraphSeparator", false, "p");
   pageReferencePicker = createPageReferencePicker({
     editor: body,
@@ -6097,33 +6186,38 @@ function bindEvents() {
       saveEditor();
     }
   });
-  window.addEventListener("popstate", () => {
-    migrateLegacyURL();
-    route(true);
+  let checkingSession = false;
+  const recheckSession = async () => {
+    if (checkingSession || !editorAuthorized || document.hidden) return;
+    checkingSession = true;
+    try {
+      if (!await checkEditorAccess()) lockEditor();
+    } finally {
+      checkingSession = false;
+    }
+  };
+  window.addEventListener("focus", recheckSession);
+  document.addEventListener("visibilitychange", recheckSession);
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) {
+      $2("#editor-shell").inert = false;
+      route();
+    }
   });
-  window.addEventListener("hashchange", () => {
-    if (migrateLegacyURL()) route(true);
-  });
-  document.addEventListener("click", (event) => {
-    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    const link = event.target.closest("a[href]");
-    if (!link || link.hasAttribute("download") || link.target && link.target !== "_self") return;
-    if (link.classList.contains("skip-link")) {
-      event.preventDefault();
-      ($2("#editor-shell").hidden ? $2("#main") : body).focus();
+  window.setInterval(recheckSession, 6e4);
+  let signingOut = false;
+  $2("#sign-out").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (signingOut) return;
+    signingOut = true;
+    const saved = await saveEditor();
+    if (saved === false) {
+      signingOut = false;
       return;
     }
-    const url = new URL(link.href, location.href);
-    if (url.origin !== location.origin || url.hash || !gardenPath(url.pathname)) return;
-    event.preventDefault();
-    if (url.pathname !== location.pathname || url.search !== location.search || location.hash) history.pushState(null, "", url.pathname + url.search);
-    route(true);
-  });
-  window.addEventListener("beforeunload", (event) => {
-    if (pendingWrites || saveFailed) {
-      event.preventDefault();
-      event.returnValue = "";
-    }
+    editorAuthorized = false;
+    $2("#editor-shell").inert = true;
+    $2("#sign-out").submit();
   });
   document.addEventListener("selectionchange", () => {
     rememberSelection();
@@ -6336,7 +6430,7 @@ async function boot() {
     initial.filter((entry) => entry.id !== HOME_ID && !entry.deleted).sort((a3, b) => a3.order - b.order).forEach((entry) => entries2.set(entry.id, entry));
     bindEvents();
     migrateLegacyURL();
-    route();
+    await route();
   } catch (error) {
     notice(`The local editor could not start. ${error.message || "Browser storage is unavailable."} Try a regular browser window with storage enabled.`, true);
     console.error(error);

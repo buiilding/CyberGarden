@@ -1,6 +1,6 @@
 # CyberGarden — local garden and editor
 
-A quiet personal garden with a separate document editor. Sample pages are neutral placeholders. The application and storage run locally, without a backend, authentication service, publishing, analytics, or remote fonts. YouTube previews load YouTube's embedded player and IFrame Player API for muting; they need no API key or account configuration.
+A quiet personal garden with a separate document editor. Pages and media remain in the browser's local IndexedDB. The loopback Python server protects editor access using Supabase Auth, Google sign-in, and an exact owner email allowlist. There is no content backend, publishing, analytics, or remote font. Existing YouTube previews are unchanged; this auth work adds no YouTube API, upload, or scopes.
 
 ## Try it
 
@@ -8,7 +8,40 @@ A quiet personal garden with a separate document editor. Sample pages are neutra
 npm start
 ```
 
-Open **http://127.0.0.1:4183**. Use **Open local editor** in the sidebar. This control opens a mock editor directly; it is not real authentication. The editor is also at http://127.0.0.1:4183/editor. Clean routes such as `/pages`, `/editor`, and `/page/note` work when opened directly or refreshed. Older `#pages`, `#editor`, and `#page/...` bookmarks and Markdown links still work and resolve to clean paths.
+Open **http://localhost:4183** (the default `APP_ORIGIN`). The public garden works without auth configuration. Open `/editor` directly to edit; without a validated owner session it opens Google sign-in. Missing configuration keeps the editor locked and shows setup instructions. Clean routes work on direct visits and refreshes; older hash bookmarks still resolve to clean paths.
+
+## Configure Google editor sign-in
+
+The local code is implemented; you must supply a Supabase project and your own Google OAuth configuration. No external project, account, or credentials are created by this repository.
+
+1. Copy `.env.example` to `.env.local`. Set `SUPABASE_URL` to your HTTPS Supabase project URL, `SUPABASE_PUBLISHABLE_KEY` to its **publishable** key (`sb_publishable_...`), and `OWNER_EMAIL_ALLOWLIST` to your exact Google account email. Email matching ignores case; it does not accept wildcards. Do not use a Supabase secret/service-role key. `.env.local` is Git-ignored and cannot be fetched from the local server.
+2. Keep `APP_ORIGIN` at the **same hostname and port you used for your existing pages**. Default: `http://localhost:4183`. If you used `http://127.0.0.1:4183`, set that instead. Browser storage is origin-specific; switching between these addresses does not move your pages. The server accepts only the configured Host and remains bound to loopback.
+3. In Google Cloud / Google Auth Platform, configure the consent screen and create a **Web application** OAuth client. For an external app in Testing mode, add your owner account as a test user. Request only `openid`, email, and profile. Add your `APP_ORIGIN` as an authorized JavaScript origin. Set the authorized redirect URI to the **Supabase Google provider callback** shown in the Supabase dashboard (normally `https://YOUR_PROJECT_REF.supabase.co/auth/v1/callback`). This Google redirect is different from the local callback below.
+4. In Supabase **Authentication → Sign In / Providers → Google**, enable Google and enter that Google Client ID and Client Secret. Keep the Google secret in Supabase's provider settings, never in browser code or this repository. Disable unused email/phone/anonymous providers for this owner-only app. Do not enable YouTube or request YouTube scopes.
+5. In Supabase **Authentication → URL Configuration**, set Site URL to your `APP_ORIGIN` and add its exact callback to Redirect URLs: `http://localhost:4183/auth/callback` (or `http://127.0.0.1:4183/auth/callback` if that is your configured origin).
+6. Restart `npm start`, open `/editor`, and choose **Continue with Google**. The server checks the verified Google identity and owner email before returning the editor. **Sign out** ends the local editor session without clearing pages or media.
+
+Official setup references: [Supabase Google sign-in](https://supabase.com/docs/guides/auth/social-sign-in/auth-google), [PKCE flow](https://supabase.com/docs/guides/auth/sessions/pkce-flow), and [redirect URLs](https://supabase.com/docs/guides/auth/redirect-urls).
+
+The local server uses the Supabase Auth HTTP API directly, so no Supabase SDK, database schema, storage bucket, migration, or service-role credential is needed. Start with Python 3.10+ and the checked-in browser bundle:
+
+```sh
+cp .env.example .env.local
+# Fill the values in .env.local, then:
+npm start
+```
+
+Environment variables already set in your shell override `.env.local`. Values are literal `KEY=value`; no shell commands, interpolation, or inline comments are evaluated.
+
+## Authentication boundary
+
+`/editor` and every editor page require server validation against Supabase's `/auth/v1/user`, including after refresh-token rotation, plus the owner email allowlist and a verified Google identity. Public HTML contains no editor controls; `editor.html` is a server-only template. Moving between garden and editor makes a full document request. The editor also checks `/auth/session` on entry, window focus, returning from browser history, and every minute while visible; a failed check locks it and returns to sign-in.
+
+PKCE verifiers and Supabase access/refresh tokens stay in server memory. The browser receives only a random, host-only, HttpOnly, SameSite=Lax session cookie. Login and logout forms require a same-origin POST and a CSRF token. The cookie intentionally uses local HTTP without `Secure`; this server is restricted to loopback HTTP and is not a production deployment. Sessions expire after eight hours or a server restart. Logout invalidates local access immediately and attempts Supabase logout for this session only. Supabase's upstream access-token revocation behavior still applies to tokens issued elsewhere.
+
+This protects the editor delivered by the server. As requested, content is still local and public garden views can read it. Auth does not encrypt IndexedDB or protect it from someone with access to this browser profile or its developer tools. No page content or media is sent to Supabase. Keep using the same browser and origin, and keep portable exports.
+
+## Use the editor
 
 - Click into the page title or body and type. Use the toolbar for headings and bold. No Markdown or HTML typing is needed.
 - In the body of Home or any page, type `!` at the start of a line or after a space to find a page. Keep typing to search its title, including multiple words; use Up/Down and Enter, or click a result. The title becomes an underlined link and writing continues after it. Escape keeps your literal `!query`. Links export as ordinary Markdown, such as `[A small note](/page/note)`, with stable page IDs; Home links to `/`.
@@ -53,10 +86,12 @@ A `.md` file contains references, not binary media. **Export with media (.zip)**
 
 ## Source and rebuild
 
-- `index.html`, `style.css`: garden and editor layout, preserving the original garden design.
+- `index.html`, `style.css`: public garden layout and shared styling.
+- `editor.html`: editor template, returned only inside an authenticated editor document.
 - `src/app.js`: editing, Markdown conversion, routing, local storage, and import/export.
 - `src/routes.js`: clean paths and compatibility with older hash links.
-- `server.py`: local static server with route fallback for direct visits and refreshes.
+- `server.py`, `auth.py`: local route protection, server-side OAuth PKCE exchange, session validation/refresh, and restricted static serving.
+- `src/editor-auth.js`: same-origin session checks; contains no Supabase credentials or tokens.
 - `script.js`: checked-in browser bundle. The local server can run without installing dependencies.
 - `content/entries.json`: starter content, separate from the website source.
 - `content/home.json`: starter title and Markdown for the editable homepage.
@@ -69,6 +104,15 @@ npm ci
 npm run build
 ```
 
-Run `node --test tests/page-references.test.mjs` for focused page-picker checks. These use a DOM harness with simulated selection, geometry, and native editing; visual positioning and actual browser editing are left for local testing.
+Run the local checks:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_*.py'
+node --test tests/*.test.mjs
+npm run build
+node --check script.js
+```
+
+Auth integration tests run real loopback HTTP requests against an isolated Supabase/Google protocol fixture: PKCE, owner rejection, session validation/refresh, logout, CSRF, expiry, private-file access, and the referrer policies required for native login/logout forms. There is no bypass switch in the app and automated tests do not use real accounts or change real services. DOM tests cover public rendering, editor authorization and local saves, plus page-picker logic with simulated selection and geometry. In this checkout, Google consent, owner editor access, sign-out, and rejection of a signed-out direct editor visit were also verified in Chrome using the configured account. Browser verification did not change page text. A fresh checkout still needs the configuration above; real credentials remain outside Git.
 
 The bundle contains marked, Turndown, DOMPurify, and fflate. Application dependencies are bundled locally; YouTube players load from YouTube when a video is shown. Keep the server bound to `127.0.0.1` for local review.

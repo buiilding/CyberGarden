@@ -14,7 +14,6 @@
 <a class="site-name" href="/">Peter</a>
 <nav aria-label="Site navigation"><a href="/" data-page="home" aria-current="page">Home</a><a href="/pages" data-page="pages">All Pages</a></nav>
 <div class="page-shelf"><p class="quiet-label">a few pages</p><nav aria-label="Pages"></nav></div>
-<a class="editor-entry" href="/editor">Open local editor <span aria-hidden="true">↗</span></a>
 </aside>
 <main id="main" tabindex="-1">
 <section id="home-view" class="view" aria-labelledby="home-title">
@@ -25,49 +24,7 @@
 <article id="page-view" class="view document" hidden aria-labelledby="page-title"><div class="page-topline"><a class="back-link" href="/">← Home</a></div><h1 id="page-title"></h1><div id="page-content"></div><div class="page-connections"><span class="quiet-label">another page</span><a id="related-page" href="/"></a></div></article>
 </main>
 </div>
-<section id="editor-shell" hidden aria-label="Local garden editor">
-  <header class="editor-header"><a class="editor-brand" href="/">Peter</a></header>
-  <div class="editor-layout">
-    <aside class="editor-sidebar">
-      <a id="editor-home" class="editor-home" href="/editor/home">Home</a>
-      <div class="editor-nav-heading"><span class="quiet-label">your pages</span><button id="new-entry" class="text-button">+ New page</button></div>
-      <nav id="editor-pages" aria-label="Edit a page"></nav>
-      <div class="editor-import">
-        <button id="import-markdown" class="text-button">Import Markdown…</button>
-        <div class="editor-exports"><button id="export-markdown" class="text-button">Export .md</button><button id="export-bundle" class="text-button">Export with media (.zip)</button></div>
-      </div>
-    </aside>
-    <main class="editor-main">
-      <p id="editor-empty" class="intro-line" hidden>No pages</p>
-      <div id="editor-document">
-      <label class="sr-only" for="entry-title">Page title</label><input id="entry-title" class="entry-title" placeholder="Untitled page" autocomplete="off">
-      <div class="writing-toolbar" role="toolbar" aria-label="Document formatting">
-        <div id="block-format-picker" class="block-format-picker">
-          <button id="block-format" class="block-format-trigger" type="button" aria-label="Text style" aria-haspopup="menu" aria-expanded="false" aria-controls="block-format-menu" data-value="p"><span id="block-format-label">Text</span><span class="dropdown-chevron" aria-hidden="true"></span></button>
-          <div id="block-format-menu" class="block-format-menu" role="menu" aria-label="Text style" hidden>
-            <button type="button" role="menuitemradio" aria-checked="true" data-block="p" tabindex="-1">Text</button>
-            <button type="button" role="menuitemradio" aria-checked="false" data-block="h2" tabindex="-1">Heading</button>
-            <button type="button" role="menuitemradio" aria-checked="false" data-block="h3" tabindex="-1">Small heading</button>
-          </div>
-        </div>
-        <button data-command="bold" title="Bold (⌘/Ctrl B)" aria-label="Bold"><b>B</b></button>
-      </div>
-      <div id="writing-body" class="document writing-body" contenteditable="true" role="textbox" aria-label="Page content" aria-multiline="true" data-placeholder="Click here and start a page…" spellcheck="true"></div>
-      <div class="editor-bottom"><a id="preview-entry" href="/">Save ↗</a><button id="delete-entry" class="text-button" type="button" aria-label="Delete page">Delete <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></button></div>
-      </div>
-    </main>
-  </div>
-</section>
-<div id="page-reference-menu" class="page-reference-menu" role="listbox" aria-label="Link to a page" hidden></div>
-<div id="writing-menu" class="writing-menu" role="menu" aria-label="Insert media" hidden>
-  <button type="button" role="menuitem" data-insert="image" tabindex="-1">Add image</button>
-  <button type="button" role="menuitem" data-insert="video" tabindex="-1">Upload video</button>
-  <button type="button" role="menuitem" data-insert="youtube" tabindex="-1">YouTube URL</button>
-</div>
-<dialog id="insert-dialog"><form id="insert-form"><h2 id="insert-title">Add a link</h2><label id="url-label" for="insert-url">URL</label><input id="insert-url" type="text" required autocomplete="off"><label id="caption-label" for="insert-caption">Link text</label><input id="insert-caption" type="text"><p id="insert-help"></p><p id="insert-error" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-insert">Cancel</button><button type="submit" class="primary-button">Insert</button></div></form></dialog>
-<input id="image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/avif" hidden>
-<input id="video-file" type="file" accept="video/*" hidden>
-<input id="markdown-file" type="file" accept=".md,.markdown,.zip,text/markdown,application/zip" hidden>
+<!-- EDITOR -->
 <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
 </body>
 </html>
