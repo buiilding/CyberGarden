@@ -38,11 +38,9 @@
     <aside class="editor-sidebar">
       <div class="editor-nav-heading"><span class="quiet-label">your pages</span><button id="new-entry" class="text-button">+ New page</button></div>
       <nav id="editor-pages" aria-label="Edit a page"></nav>
-      <div class="editor-import"><button id="import-markdown" class="text-button">Import Markdown…</button><p>Opens a .md file as a new page.<br>A garden ZIP brings its media, too.</p></div>
-      <p class="local-note">A local prototype.<br>No account or publishing.<br>Changes stay in this browser.</p>
+      <div class="editor-import"><button id="import-markdown" class="text-button">Import Markdown…</button></div>
     </aside>
     <main class="editor-main">
-      <div class="editor-document-top"><span class="quiet-label">a page in your garden</span><span id="save-status" role="status" aria-live="polite">Saved in this browser</span></div>
       <label class="sr-only" for="entry-title">Page title</label><input id="entry-title" class="entry-title" placeholder="Untitled page" autocomplete="off">
       <div class="writing-toolbar" role="toolbar" aria-label="Document formatting">
         <label class="sr-only" for="block-format">Text style</label><select id="block-format" title="Text style"><option value="p">Text</option><option value="h2">Heading</option><option value="h3">Small heading</option></select>
@@ -50,12 +48,15 @@
         <span class="toolbar-rule"></span><button id="add-image">Add image</button><button id="add-video">Upload video</button><button id="add-youtube">YouTube URL</button>
       </div>
       <div id="writing-body" class="document writing-body" contenteditable="true" role="textbox" aria-label="Page content" aria-multiline="true" data-placeholder="Click here and start a page…" spellcheck="true"></div>
-      <p class="writing-hint">Click and type. Paste an image anywhere in the page.</p>
       <div class="editor-bottom"><a id="preview-entry" href="#">View this page ↗</a><div><button id="export-markdown" class="text-button">Export .md</button><button id="export-bundle" class="text-button">Export with media (.zip)</button></div></div>
-      <details class="portability"><summary>What goes into the Markdown?</summary><p>Your title is stored separately here. A .md export puts it on the first line as <code># Page title</code>; import reads that line back as the title.</p><p>Images use <code>![Description](assets/file.png)</code>. Local videos use <code>[Video: file.mp4](assets/file.mp4)</code>. YouTube references use a plain URL on its own line.</p><p>The ZIP contains your .md and its local media in an <code>assets/</code> folder. Import that ZIP here to restore both. Remote images and YouTube show placeholders; they do not load remote content.</p></details>
     </main>
   </div>
 </section>
+<div id="writing-menu" class="writing-menu" role="menu" aria-label="Insert media" hidden>
+  <button type="button" role="menuitem" data-insert="image" tabindex="-1">Add image</button>
+  <button type="button" role="menuitem" data-insert="video" tabindex="-1">Upload video</button>
+  <button type="button" role="menuitem" data-insert="youtube" tabindex="-1">YouTube URL</button>
+</div>
 <dialog id="insert-dialog"><form id="insert-form"><h2 id="insert-title">Add a link</h2><label id="url-label" for="insert-url">URL</label><input id="insert-url" type="text" required autocomplete="off"><label id="caption-label" for="insert-caption">Link text</label><input id="insert-caption" type="text"><p id="insert-help"></p><p id="insert-error" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-insert">Cancel</button><button type="submit" class="primary-button">Insert</button></div></form></dialog>
 <input id="image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/avif" hidden>
 <input id="video-file" type="file" accept="video/*" hidden>

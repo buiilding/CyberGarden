@@ -5082,10 +5082,6 @@ function notice(message, error = false) {
     $2("#notice").hidden = true;
   }, error ? 9e3 : 4500);
 }
-function saveStatus(message, error = false) {
-  $2("#save-status").textContent = message;
-  $2("#save-status").dataset.state = error ? "error" : "saved";
-}
 function openDB() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open("cybergarden-local-v1", 1);
@@ -5117,16 +5113,13 @@ function writeRecords(store, records) {
 function persist(entry) {
   const currentRevision = ++revision;
   pendingWrites++;
-  saveStatus("Saving locally\u2026");
   return writeRecords("entries", [{ ...entry }]).then(() => {
     if (currentRevision === revision) {
       saveFailed = false;
-      saveStatus("Saved in this browser");
     }
     return true;
   }).catch(() => {
     saveFailed = true;
-    saveStatus("Could not save \u2014 export a copy", true);
     notice("Browser storage could not save this change. Keep this tab open and export your page.", true);
     return false;
   }).finally(() => {
@@ -5292,6 +5285,7 @@ function updateHome() {
   if (first) $2(".intro a").textContent = titleFor(first).toLowerCase();
 }
 function route(focus = false) {
+  closeWritingMenu();
   if (location.hash === "#main") {
     $2("#main").focus();
     return;
@@ -5311,7 +5305,6 @@ function route(focus = false) {
     savedRange = null;
     $2("#view-garden").href = `#page/${activeId}`;
     $2("#preview-entry").href = `#page/${activeId}`;
-    saveStatus(saveFailed ? "Could not save \u2014 export a copy" : pendingWrites ? "Saving locally\u2026" : "Saved in this browser", saveFailed);
     document.title = `${titleFor(entry)} \u2014 Local editor`;
   } else {
     activeId = null;
@@ -5365,6 +5358,60 @@ function restoreSelection() {
   const selection = window.getSelection();
   selection.removeAllRanges();
   selection.addRange(range);
+}
+function closeWritingMenu(returnFocus = false) {
+  const menu = $2("#writing-menu");
+  if (menu.hidden) return;
+  menu.hidden = true;
+  if (returnFocus) restoreSelection();
+}
+function showWritingMenu(event) {
+  event.preventDefault();
+  const menu = $2("#writing-menu");
+  let range;
+  const fromKeyboard = event.clientX === 0 && event.clientY === 0;
+  if (!fromKeyboard) {
+    if (document.caretPositionFromPoint) {
+      const caret = document.caretPositionFromPoint(event.clientX, event.clientY);
+      if (caret && body.contains(caret.offsetNode)) {
+        range = document.createRange();
+        range.setStart(caret.offsetNode, caret.offset);
+        range.collapse(true);
+      }
+    } else if (document.caretRangeFromPoint) {
+      const caret = document.caretRangeFromPoint(event.clientX, event.clientY);
+      if (caret && body.contains(caret.startContainer)) range = caret;
+    }
+  } else {
+    rememberSelection();
+    if (savedRange && body.contains(savedRange.commonAncestorContainer)) range = savedRange.cloneRange();
+  }
+  if (!range) {
+    range = document.createRange();
+    range.selectNodeContents(body);
+  }
+  range.collapse(false);
+  const media = (range.startContainer.nodeType === 1 ? range.startContainer : range.startContainer.parentElement)?.closest("[data-media-kind]");
+  if (media) {
+    range.setStartAfter(media);
+    range.collapse(true);
+  }
+  body.focus({ preventScroll: true });
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  savedRange = range.cloneRange();
+  menu.hidden = false;
+  const caretRect = range.getBoundingClientRect();
+  const bodyRect = body.getBoundingClientRect();
+  const hasCaretRect = caretRect.width || caretRect.height;
+  const keyboardX = hasCaretRect ? caretRect.left : bodyRect.left;
+  const keyboardY = hasCaretRect ? caretRect.bottom : bodyRect.top;
+  const x2 = fromKeyboard ? keyboardX : event.clientX;
+  const y2 = fromKeyboard ? keyboardY : event.clientY;
+  menu.style.left = `${Math.max(8, Math.min(x2, window.innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y2, window.innerHeight - menu.offsetHeight - 8))}px`;
+  menu.querySelector("button").focus({ preventScroll: true });
 }
 function insertNode(node) {
   restoreSelection();
@@ -5555,6 +5602,36 @@ function bindEvents() {
     }
   });
   document.addEventListener("selectionchange", rememberSelection);
+  body.addEventListener("contextmenu", showWritingMenu);
+  const writingMenu = $2("#writing-menu");
+  writingMenu.addEventListener("mousedown", (event) => event.preventDefault());
+  writingMenu.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-insert]");
+    if (!button) return;
+    closeWritingMenu(true);
+    $2(`#add-${button.dataset.insert}`).click();
+  });
+  writingMenu.addEventListener("keydown", (event) => {
+    const buttons = [...writingMenu.querySelectorAll("button")];
+    const index = buttons.indexOf(document.activeElement);
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault();
+      const next2 = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+      buttons[next2].focus();
+    } else if (event.key === "Escape" || event.key === "Tab") {
+      event.preventDefault();
+      closeWritingMenu(true);
+    }
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!writingMenu.contains(event.target)) closeWritingMenu();
+  });
+  document.addEventListener("focusin", (event) => {
+    if (!writingMenu.contains(event.target)) closeWritingMenu();
+  });
+  window.addEventListener("scroll", () => closeWritingMenu(), true);
+  window.addEventListener("resize", () => closeWritingMenu());
+  window.addEventListener("blur", () => closeWritingMenu());
   body.addEventListener("input", saveEditor);
   body.addEventListener("click", (event) => {
     const media = event.target.closest("[data-media-kind]");

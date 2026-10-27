@@ -11,6 +11,7 @@ npm start
 Open **http://127.0.0.1:4183**. Use **Open local editor** in the sidebar or **Edit this page** on a garden page. This control opens a mock editor directly; it is not real authentication. The editor is also at http://127.0.0.1:4183/#editor.
 
 - Click into the page title or body and type. Use the toolbar for headings, bold, italic, and links. No Markdown or HTML typing is needed.
+- Right-click inside the page body for **Add image**, **Upload video**, and **YouTube URL** at that position. Press Escape or click outside to dismiss the menu.
 - Paste an image from your clipboard at the text cursor, or choose **Add image**. Supported images: PNG, JPEG, GIF, WebP, AVIF.
 - Select a media item and press Backspace or Delete to remove it.
 - Choose **Upload video** for a local file preview with playback controls. Playback depends on the browser's supported codecs. Files are limited to 40 MB each for this prototype.
