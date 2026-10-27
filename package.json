@@ -1,0 +1,19 @@
+{
+  "name": "cybergarden-local",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/app.js --bundle --format=esm --outfile=script.js",
+    "start": "python3 -m http.server 4183 --bind 127.0.0.1"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.17",
+    "fflate": "^0.8.3",
+    "marked": "^18.1.2",
+    "turndown": "^7.2.4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

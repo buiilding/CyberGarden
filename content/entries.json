@@ -1,0 +1,32 @@
+[
+  {
+    "id": "untitled",
+    "title": "An untitled page",
+    "related": "note",
+    "markdown": "This is a sample page. It can hold a longer piece of writing, a picture, a link, or something unfinished.\n\nThere is no required structure. A page can change over time.\n\n## A section, if needed\n\nText can connect to [a small note](#page/note) or [a saved link](#page/link). Those pages can be small enough to stand on their own.\n\n- A line of text.\n- Something to come back to.\n- A link to [an unfinished page](#page/unfinished).\n\n## A place for a video\n\nhttps://www.youtube.com/watch?v=jfKfPfyJRdk\n\nA sample video reference. It stays a quiet placeholder in this local prototype."
+  },
+  {
+    "id": "note",
+    "title": "A small note",
+    "related": "untitled",
+    "markdown": "A short piece of sample text.\nA second line, and that can be enough."
+  },
+  {
+    "id": "link",
+    "title": "A saved link",
+    "related": "image",
+    "markdown": "[Example Domain ↗](https://example.com)\n\nAn optional sentence to go with a link."
+  },
+  {
+    "id": "image",
+    "title": "A sample image",
+    "related": "unfinished",
+    "markdown": "![A neutral geometric placeholder: a blue rectangle and a pale circle on a gray field.](./sample.svg)\n\nA sample image. A caption can go here, if one is needed."
+  },
+  {
+    "id": "unfinished",
+    "title": "An unfinished page",
+    "related": "untitled",
+    "markdown": "Just the beginning of something…"
+  }
+]
