@@ -33,22 +33,34 @@
 </main>
 </div>
 <section id="editor-shell" hidden aria-label="Local garden editor">
-  <header class="editor-header"><a class="editor-brand" href="#">Peter <span>/ local editor</span></a><a id="view-garden" href="#">← View garden</a></header>
+  <header class="editor-header"><a class="editor-brand" href="#">Peter</a></header>
   <div class="editor-layout">
     <aside class="editor-sidebar">
       <div class="editor-nav-heading"><span class="quiet-label">your pages</span><button id="new-entry" class="text-button">+ New page</button></div>
       <nav id="editor-pages" aria-label="Edit a page"></nav>
-      <div class="editor-import"><button id="import-markdown" class="text-button">Import Markdown…</button></div>
+      <div class="editor-import">
+        <button id="import-markdown" class="text-button">Import Markdown…</button>
+        <div class="editor-exports"><button id="export-markdown" class="text-button">Export .md</button><button id="export-bundle" class="text-button">Export with media (.zip)</button></div>
+      </div>
     </aside>
     <main class="editor-main">
+      <p id="editor-empty" class="intro-line" hidden>No pages</p>
+      <div id="editor-document">
       <label class="sr-only" for="entry-title">Page title</label><input id="entry-title" class="entry-title" placeholder="Untitled page" autocomplete="off">
       <div class="writing-toolbar" role="toolbar" aria-label="Document formatting">
-        <label class="sr-only" for="block-format">Text style</label><select id="block-format" title="Text style"><option value="p">Text</option><option value="h2">Heading</option><option value="h3">Small heading</option></select>
-        <button data-command="bold" title="Bold (⌘/Ctrl B)" aria-label="Bold"><b>B</b></button><button data-command="italic" title="Italic (⌘/Ctrl I)" aria-label="Italic"><i>I</i></button><button id="add-link">Link</button>
-        <span class="toolbar-rule"></span><button id="add-image">Add image</button><button id="add-video">Upload video</button><button id="add-youtube">YouTube URL</button>
+        <div id="block-format-picker" class="block-format-picker">
+          <button id="block-format" class="block-format-trigger" type="button" aria-label="Text style" aria-haspopup="menu" aria-expanded="false" aria-controls="block-format-menu" data-value="p"><span id="block-format-label">Text</span><span class="dropdown-chevron" aria-hidden="true"></span></button>
+          <div id="block-format-menu" class="block-format-menu" role="menu" aria-label="Text style" hidden>
+            <button type="button" role="menuitemradio" aria-checked="true" data-block="p" tabindex="-1">Text</button>
+            <button type="button" role="menuitemradio" aria-checked="false" data-block="h2" tabindex="-1">Heading</button>
+            <button type="button" role="menuitemradio" aria-checked="false" data-block="h3" tabindex="-1">Small heading</button>
+          </div>
+        </div>
+        <button data-command="bold" title="Bold (⌘/Ctrl B)" aria-label="Bold"><b>B</b></button>
       </div>
       <div id="writing-body" class="document writing-body" contenteditable="true" role="textbox" aria-label="Page content" aria-multiline="true" data-placeholder="Click here and start a page…" spellcheck="true"></div>
-      <div class="editor-bottom"><a id="preview-entry" href="#">View this page ↗</a><div><button id="export-markdown" class="text-button">Export .md</button><button id="export-bundle" class="text-button">Export with media (.zip)</button></div></div>
+      <div class="editor-bottom"><a id="preview-entry" href="#">Save ↗</a><button id="delete-entry" class="text-button" type="button" aria-label="Delete page">Delete <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></button></div>
+      </div>
     </main>
   </div>
 </section>

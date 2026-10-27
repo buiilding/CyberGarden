@@ -10,7 +10,7 @@ const entries = new Map();
 const assets = new Map();
 const urls = new Map();
 let db, activeId, savedRange, insertMode, revision = 0, pendingWrites = 0, saveFailed = false;
-let noticeTimer;
+let noticeTimer, deletingId = null;
 const escapeHTML = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const slug = value => value.normalize('NFKD').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 90) || 'page';
 const mdDestination = value => value.replace(/ /g, '%20').replace(/\(/g, '%28').replace(/\)/g, '%29');
@@ -149,7 +149,7 @@ turndown.addRule('gardenMedia', {
   }
 });
 function saveEditor() {
-  if (!activeId || $('#editor-shell').hidden) return;
+  if (!activeId || activeId === deletingId || $('#editor-shell').hidden) return;
   const entry = entries.get(activeId);
   entry.title = titleInput.value;
   entry.markdown = turndown.turndown(body.innerHTML);
@@ -171,8 +171,10 @@ function renderNavigation() {
 }
 function updateHome() {
   for (const [id, selector] of [['note', '.small-note'], ['link', '.saved-link'], ['unfinished', '.unfinished']]) {
-    const entry = entries.get(id); if (!entry) continue;
-    const section = $(selector); section.querySelector('h2 a').textContent = titleFor(entry);
+    const entry = entries.get(id), section = $(selector);
+    section.hidden = !entry;
+    if (!entry) continue;
+    section.querySelector('h2 a').textContent = titleFor(entry);
     const fragment = renderMarkdown(entry.markdown);
     fragment.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
     const paragraphs = [...fragment.querySelectorAll('p')];
@@ -185,6 +187,7 @@ function updateHome() {
     }
   }
   const entry = entries.get('image');
+  $('.image-fragment').hidden = !entry;
   if (entry) {
     $('.image-fragment figcaption a').textContent = titleFor(entry);
     const match = entry.markdown.match(/!\[[^\]]*\]\(([^)]+)\)/);
@@ -195,11 +198,16 @@ function updateHome() {
       $('.image-fragment img').alt = renderMarkdown(entry.markdown).querySelector('img')?.alt || titleFor(entry);
     }
   }
-  const first = entries.get('untitled');
-  if (first) $('.intro a').textContent = titleFor(first).toLowerCase();
+  const first = entries.get('untitled') || entries.values().next().value;
+  $('.intro p:last-child').hidden = !first;
+  if (first) {
+    $('.intro a').textContent = titleFor(first).toLowerCase();
+    $('.intro a').href = `#page/${first.id}`;
+  }
 }
 function route(focus = false) {
   closeWritingMenu();
+  closeBlockMenu();
   if (location.hash === '#main') { $('#main').focus(); return; }
   body.querySelectorAll('video').forEach(video => video.pause());
   $('#page-content').querySelectorAll('video').forEach(video => video.pause());
@@ -211,12 +219,14 @@ function route(focus = false) {
   if (editing) {
     activeId = entries.has(id) ? id : entries.keys().next().value;
     const entry = entries.get(activeId);
-    titleInput.value = entry.title;
-    body.replaceChildren(renderMarkdown(entry.markdown, true));
+    $('#editor-document').hidden = !entry;
+    $('#editor-empty').hidden = !!entry;
+    titleInput.value = entry?.title || '';
+    body.replaceChildren(entry ? renderMarkdown(entry.markdown, true) : document.createDocumentFragment());
     savedRange = null;
-    $('#view-garden').href = `#page/${activeId}`;
-    $('#preview-entry').href = `#page/${activeId}`;
-    document.title = `${titleFor(entry)} — Local editor`;
+    setBlockFormat('p');
+    $('#preview-entry').href = entry ? `#page/${activeId}` : '#';
+    document.title = entry ? `${titleFor(entry)} — Local editor` : 'Local editor — Peter';
   } else {
     activeId = null;
     const entry = entries.get(id);
@@ -254,6 +264,36 @@ function restoreSelection() {
   if (mediaParent) { range.setStartAfter(mediaParent); range.collapse(true); }
   const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
 }
+function setBlockFormat(value) {
+  const labels = { p: 'Text', h2: 'Heading', h3: 'Small heading' };
+  $('#block-format').dataset.value = value;
+  $('#block-format-label').textContent = labels[value];
+  document.querySelectorAll('[data-block]').forEach(button => button.setAttribute('aria-checked', String(button.dataset.block === value)));
+}
+function syncBlockFormat() {
+  const node = window.getSelection().focusNode;
+  if (!node || !body.contains(node)) return;
+  const element = node.nodeType === 1 ? node : node.parentElement;
+  if (element.closest('[data-media-kind]')) return;
+  setBlockFormat(element.closest('h2,h3')?.tagName.toLowerCase() || 'p');
+}
+function closeBlockMenu(returnFocus = false) {
+  const menu = $('#block-format-menu');
+  if (menu.hidden) return;
+  menu.hidden = true;
+  $('#block-format').setAttribute('aria-expanded', 'false');
+  if (returnFocus) $('#block-format').focus({ preventScroll: true });
+}
+function showBlockMenu(edge) {
+  closeWritingMenu();
+  rememberSelection();
+  syncBlockFormat();
+  $('#block-format-menu').hidden = false;
+  $('#block-format').setAttribute('aria-expanded', 'true');
+  const choices = [...document.querySelectorAll('[data-block]')];
+  const target = edge === 'first' ? choices[0] : edge === 'last' ? choices.at(-1) : choices.find(button => button.getAttribute('aria-checked') === 'true');
+  target.focus({ preventScroll: true });
+}
 function closeWritingMenu(returnFocus = false) {
   const menu = $('#writing-menu');
   if (menu.hidden) return;
@@ -262,6 +302,7 @@ function closeWritingMenu(returnFocus = false) {
 }
 function showWritingMenu(event) {
   event.preventDefault();
+  closeBlockMenu();
   const menu = $('#writing-menu');
   let range;
   const fromKeyboard = event.clientX === 0 && event.clientY === 0;
@@ -374,6 +415,31 @@ async function createEntry(title = '', markdown = '') {
   titleInput.focus();
   await persist(entry);
 }
+async function deleteCurrentEntry() {
+  const id = activeId;
+  if (!id || !entries.has(id) || deletingId) return;
+  deletingId = id;
+  $('#delete-entry').disabled = true;
+  pendingWrites++;
+  try {
+    // This marker prevents the starter pages returning after the final page is deleted.
+    await writeRecords('entries', [{ id, deleted: true }]);
+    entries.delete(id);
+    if (activeId === id) {
+      const nextId = entries.keys().next().value;
+      history.replaceState(null, '', nextId ? `#editor/${nextId}` : '#editor');
+      route(true);
+    } else if ($('#editor-shell').hidden) route();
+    else renderNavigation();
+    notice('Page deleted.');
+  } catch {
+    notice('Could not delete this page. It has been kept.', true);
+  } finally {
+    pendingWrites--;
+    deletingId = null;
+    $('#delete-entry').disabled = false;
+  }
+}
 async function importFile(file) {
   if (!file) return;
   if (file.size > 100 * 1024 * 1024) { notice('Choose a Markdown file or garden ZIP smaller than 100 MB.', true); return; }
@@ -420,7 +486,47 @@ function bindEvents() {
   document.execCommand('defaultParagraphSeparator', false, 'p');
   window.addEventListener('hashchange', () => route(true));
   window.addEventListener('beforeunload', event => { if (pendingWrites || saveFailed) { event.preventDefault(); event.returnValue = ''; } });
-  document.addEventListener('selectionchange', rememberSelection);
+  document.addEventListener('selectionchange', () => {
+    rememberSelection();
+    if ($('#block-format-menu').hidden) syncBlockFormat();
+  });
+  const blockPicker = $('#block-format-picker');
+  const blockMenu = $('#block-format-menu');
+  blockPicker.addEventListener('mousedown', event => event.preventDefault());
+  $('#block-format').addEventListener('click', () => {
+    if (blockMenu.hidden) showBlockMenu();
+    else closeBlockMenu(true);
+  });
+  $('#block-format').addEventListener('keydown', event => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault(); showBlockMenu(event.key === 'ArrowDown' ? 'first' : 'last');
+    }
+  });
+  blockMenu.addEventListener('click', event => {
+    const choice = event.target.closest('[data-block]');
+    if (!choice) return;
+    closeBlockMenu();
+    restoreSelection();
+    document.execCommand('formatBlock', false, choice.dataset.block);
+    rememberSelection();
+    setBlockFormat(choice.dataset.block);
+    saveEditor();
+  });
+  blockMenu.addEventListener('keydown', event => {
+    const choices = [...blockMenu.querySelectorAll('button')];
+    const index = choices.indexOf(document.activeElement);
+    if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
+      event.preventDefault();
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + choices.length) % choices.length;
+      choices[next].focus();
+    } else if (event.key === 'Escape') {
+      event.preventDefault(); closeBlockMenu(true);
+    } else if (event.key === 'Tab') closeBlockMenu(true);
+  });
+  document.addEventListener('pointerdown', event => { if (!blockPicker.contains(event.target)) closeBlockMenu(); });
+  document.addEventListener('focusin', event => { if (!blockPicker.contains(event.target)) closeBlockMenu(); });
+  window.addEventListener('resize', () => closeBlockMenu());
+  window.addEventListener('blur', () => closeBlockMenu());
   body.addEventListener('contextmenu', showWritingMenu);
   const writingMenu = $('#writing-menu');
   writingMenu.addEventListener('mousedown', event => event.preventDefault());
@@ -428,7 +534,12 @@ function bindEvents() {
     const button = event.target.closest('[data-insert]');
     if (!button) return;
     closeWritingMenu(true);
-    $(`#add-${button.dataset.insert}`).click();
+    const kind = button.dataset.insert;
+    if (kind === 'youtube') showInsert('youtube');
+    else if (kind === 'image' || kind === 'video') {
+      rememberSelection();
+      $(`#${kind}-file`).click();
+    }
   });
   writingMenu.addEventListener('keydown', event => {
     const buttons = [...writingMenu.querySelectorAll('button')];
@@ -473,9 +584,6 @@ function bindEvents() {
     button.addEventListener('mousedown', event => event.preventDefault());
     button.addEventListener('click', () => { restoreSelection(); document.execCommand(button.dataset.command); saveEditor(); });
   });
-  $('#block-format').addEventListener('change', event => { restoreSelection(); document.execCommand('formatBlock', false, event.target.value); saveEditor(); });
-  $('#add-link').addEventListener('click', () => showInsert('link'));
-  $('#add-youtube').addEventListener('click', () => showInsert('youtube'));
   $('#cancel-insert').addEventListener('click', () => $('#insert-dialog').close());
   $('#insert-form').addEventListener('submit', event => {
     event.preventDefault(); const url = $('#insert-url').value.trim();
@@ -488,10 +596,10 @@ function bindEvents() {
     }
   });
   for (const kind of ['image', 'video']) {
-    $(`#add-${kind}`).addEventListener('click', () => { rememberSelection(); $(`#${kind}-file`).click(); });
     $(`#${kind}-file`).addEventListener('change', event => { addFiles([...event.target.files], kind); event.target.value = ''; });
   }
   $('#new-entry').addEventListener('click', () => createEntry());
+  $('#delete-entry').addEventListener('click', deleteCurrentEntry);
   $('#import-markdown').addEventListener('click', () => $('#markdown-file').click());
   $('#markdown-file').addEventListener('change', event => { importFile(event.target.files[0]); event.target.value = ''; });
   $('#export-markdown').addEventListener('click', () => exportEntry(false));
@@ -510,7 +618,7 @@ async function boot() {
     }
     const originalOrder = ['untitled', 'note', 'link', 'image', 'unfinished'];
     initial.forEach(entry => { entry.order ??= originalOrder.includes(entry.id) ? originalOrder.indexOf(entry.id) : 5; });
-    initial.sort((a, b) => a.order - b.order).forEach(entry => entries.set(entry.id, entry));
+    initial.filter(entry => !entry.deleted).sort((a, b) => a.order - b.order).forEach(entry => entries.set(entry.id, entry));
     bindEvents(); route();
   } catch (error) {
     notice(`The local editor could not start. ${error.message || 'Browser storage is unavailable.'} Try a regular browser window with storage enabled.`, true);

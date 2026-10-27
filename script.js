@@ -5068,6 +5068,7 @@ var revision = 0;
 var pendingWrites = 0;
 var saveFailed = false;
 var noticeTimer;
+var deletingId = null;
 var escapeHTML = (value) => String(value).replace(/[&<>"']/g, (c2) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c2]);
 var slug = (value) => value.normalize("NFKD").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90) || "page";
 var mdDestination = (value) => value.replace(/ /g, "%20").replace(/\(/g, "%28").replace(/\)/g, "%29");
@@ -5222,7 +5223,7 @@ ${kind === "youtube" ? ref : kind === "image" ? `![${label}](${ref})` : `[Video:
   }
 });
 function saveEditor() {
-  if (!activeId || $2("#editor-shell").hidden) return;
+  if (!activeId || activeId === deletingId || $2("#editor-shell").hidden) return;
   const entry = entries2.get(activeId);
   entry.title = titleInput.value;
   entry.markdown = turndown.turndown(body.innerHTML);
@@ -5252,9 +5253,9 @@ function renderNavigation() {
 }
 function updateHome() {
   for (const [id, selector] of [["note", ".small-note"], ["link", ".saved-link"], ["unfinished", ".unfinished"]]) {
-    const entry2 = entries2.get(id);
+    const entry2 = entries2.get(id), section = $2(selector);
+    section.hidden = !entry2;
     if (!entry2) continue;
-    const section = $2(selector);
     section.querySelector("h2 a").textContent = titleFor(entry2);
     const fragment = renderMarkdown(entry2.markdown);
     fragment.querySelectorAll("br").forEach((br) => br.replaceWith("\n"));
@@ -5271,6 +5272,7 @@ function updateHome() {
     }
   }
   const entry = entries2.get("image");
+  $2(".image-fragment").hidden = !entry;
   if (entry) {
     $2(".image-fragment figcaption a").textContent = titleFor(entry);
     const match = entry.markdown.match(/!\[[^\]]*\]\(([^)]+)\)/);
@@ -5281,11 +5283,16 @@ function updateHome() {
       $2(".image-fragment img").alt = renderMarkdown(entry.markdown).querySelector("img")?.alt || titleFor(entry);
     }
   }
-  const first = entries2.get("untitled");
-  if (first) $2(".intro a").textContent = titleFor(first).toLowerCase();
+  const first = entries2.get("untitled") || entries2.values().next().value;
+  $2(".intro p:last-child").hidden = !first;
+  if (first) {
+    $2(".intro a").textContent = titleFor(first).toLowerCase();
+    $2(".intro a").href = `#page/${first.id}`;
+  }
 }
 function route(focus = false) {
   closeWritingMenu();
+  closeBlockMenu();
   if (location.hash === "#main") {
     $2("#main").focus();
     return;
@@ -5300,12 +5307,14 @@ function route(focus = false) {
   if (editing) {
     activeId = entries2.has(id) ? id : entries2.keys().next().value;
     const entry = entries2.get(activeId);
-    titleInput.value = entry.title;
-    body.replaceChildren(renderMarkdown(entry.markdown, true));
+    $2("#editor-document").hidden = !entry;
+    $2("#editor-empty").hidden = !!entry;
+    titleInput.value = entry?.title || "";
+    body.replaceChildren(entry ? renderMarkdown(entry.markdown, true) : document.createDocumentFragment());
     savedRange = null;
-    $2("#view-garden").href = `#page/${activeId}`;
-    $2("#preview-entry").href = `#page/${activeId}`;
-    document.title = `${titleFor(entry)} \u2014 Local editor`;
+    setBlockFormat("p");
+    $2("#preview-entry").href = entry ? `#page/${activeId}` : "#";
+    document.title = entry ? `${titleFor(entry)} \u2014 Local editor` : "Local editor \u2014 Peter";
   } else {
     activeId = null;
     const entry = entries2.get(id);
@@ -5359,6 +5368,36 @@ function restoreSelection() {
   selection.removeAllRanges();
   selection.addRange(range);
 }
+function setBlockFormat(value) {
+  const labels = { p: "Text", h2: "Heading", h3: "Small heading" };
+  $2("#block-format").dataset.value = value;
+  $2("#block-format-label").textContent = labels[value];
+  document.querySelectorAll("[data-block]").forEach((button) => button.setAttribute("aria-checked", String(button.dataset.block === value)));
+}
+function syncBlockFormat() {
+  const node = window.getSelection().focusNode;
+  if (!node || !body.contains(node)) return;
+  const element = node.nodeType === 1 ? node : node.parentElement;
+  if (element.closest("[data-media-kind]")) return;
+  setBlockFormat(element.closest("h2,h3")?.tagName.toLowerCase() || "p");
+}
+function closeBlockMenu(returnFocus = false) {
+  const menu = $2("#block-format-menu");
+  if (menu.hidden) return;
+  menu.hidden = true;
+  $2("#block-format").setAttribute("aria-expanded", "false");
+  if (returnFocus) $2("#block-format").focus({ preventScroll: true });
+}
+function showBlockMenu(edge) {
+  closeWritingMenu();
+  rememberSelection();
+  syncBlockFormat();
+  $2("#block-format-menu").hidden = false;
+  $2("#block-format").setAttribute("aria-expanded", "true");
+  const choices = [...document.querySelectorAll("[data-block]")];
+  const target = edge === "first" ? choices[0] : edge === "last" ? choices.at(-1) : choices.find((button) => button.getAttribute("aria-checked") === "true");
+  target.focus({ preventScroll: true });
+}
 function closeWritingMenu(returnFocus = false) {
   const menu = $2("#writing-menu");
   if (menu.hidden) return;
@@ -5367,6 +5406,7 @@ function closeWritingMenu(returnFocus = false) {
 }
 function showWritingMenu(event) {
   event.preventDefault();
+  closeBlockMenu();
   const menu = $2("#writing-menu");
   let range;
   const fromKeyboard = event.clientX === 0 && event.clientY === 0;
@@ -5540,6 +5580,30 @@ async function createEntry(title = "", markdown = "") {
   titleInput.focus();
   await persist(entry);
 }
+async function deleteCurrentEntry() {
+  const id = activeId;
+  if (!id || !entries2.has(id) || deletingId) return;
+  deletingId = id;
+  $2("#delete-entry").disabled = true;
+  pendingWrites++;
+  try {
+    await writeRecords("entries", [{ id, deleted: true }]);
+    entries2.delete(id);
+    if (activeId === id) {
+      const nextId = entries2.keys().next().value;
+      history.replaceState(null, "", nextId ? `#editor/${nextId}` : "#editor");
+      route(true);
+    } else if ($2("#editor-shell").hidden) route();
+    else renderNavigation();
+    notice("Page deleted.");
+  } catch {
+    notice("Could not delete this page. It has been kept.", true);
+  } finally {
+    pendingWrites--;
+    deletingId = null;
+    $2("#delete-entry").disabled = false;
+  }
+}
 async function importFile(file) {
   if (!file) return;
   if (file.size > 100 * 1024 * 1024) {
@@ -5601,7 +5665,53 @@ function bindEvents() {
       event.returnValue = "";
     }
   });
-  document.addEventListener("selectionchange", rememberSelection);
+  document.addEventListener("selectionchange", () => {
+    rememberSelection();
+    if ($2("#block-format-menu").hidden) syncBlockFormat();
+  });
+  const blockPicker = $2("#block-format-picker");
+  const blockMenu = $2("#block-format-menu");
+  blockPicker.addEventListener("mousedown", (event) => event.preventDefault());
+  $2("#block-format").addEventListener("click", () => {
+    if (blockMenu.hidden) showBlockMenu();
+    else closeBlockMenu(true);
+  });
+  $2("#block-format").addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      showBlockMenu(event.key === "ArrowDown" ? "first" : "last");
+    }
+  });
+  blockMenu.addEventListener("click", (event) => {
+    const choice = event.target.closest("[data-block]");
+    if (!choice) return;
+    closeBlockMenu();
+    restoreSelection();
+    document.execCommand("formatBlock", false, choice.dataset.block);
+    rememberSelection();
+    setBlockFormat(choice.dataset.block);
+    saveEditor();
+  });
+  blockMenu.addEventListener("keydown", (event) => {
+    const choices = [...blockMenu.querySelectorAll("button")];
+    const index = choices.indexOf(document.activeElement);
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+      event.preventDefault();
+      const next2 = event.key === "Home" ? 0 : event.key === "End" ? choices.length - 1 : (index + (event.key === "ArrowDown" ? 1 : -1) + choices.length) % choices.length;
+      choices[next2].focus();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeBlockMenu(true);
+    } else if (event.key === "Tab") closeBlockMenu(true);
+  });
+  document.addEventListener("pointerdown", (event) => {
+    if (!blockPicker.contains(event.target)) closeBlockMenu();
+  });
+  document.addEventListener("focusin", (event) => {
+    if (!blockPicker.contains(event.target)) closeBlockMenu();
+  });
+  window.addEventListener("resize", () => closeBlockMenu());
+  window.addEventListener("blur", () => closeBlockMenu());
   body.addEventListener("contextmenu", showWritingMenu);
   const writingMenu = $2("#writing-menu");
   writingMenu.addEventListener("mousedown", (event) => event.preventDefault());
@@ -5609,7 +5719,12 @@ function bindEvents() {
     const button = event.target.closest("[data-insert]");
     if (!button) return;
     closeWritingMenu(true);
-    $2(`#add-${button.dataset.insert}`).click();
+    const kind = button.dataset.insert;
+    if (kind === "youtube") showInsert("youtube");
+    else if (kind === "image" || kind === "video") {
+      rememberSelection();
+      $2(`#${kind}-file`).click();
+    }
   });
   writingMenu.addEventListener("keydown", (event) => {
     const buttons = [...writingMenu.querySelectorAll("button")];
@@ -5672,13 +5787,6 @@ function bindEvents() {
       saveEditor();
     });
   });
-  $2("#block-format").addEventListener("change", (event) => {
-    restoreSelection();
-    document.execCommand("formatBlock", false, event.target.value);
-    saveEditor();
-  });
-  $2("#add-link").addEventListener("click", () => showInsert("link"));
-  $2("#add-youtube").addEventListener("click", () => showInsert("youtube"));
   $2("#cancel-insert").addEventListener("click", () => $2("#insert-dialog").close());
   $2("#insert-form").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -5706,16 +5814,13 @@ function bindEvents() {
     }
   });
   for (const kind of ["image", "video"]) {
-    $2(`#add-${kind}`).addEventListener("click", () => {
-      rememberSelection();
-      $2(`#${kind}-file`).click();
-    });
     $2(`#${kind}-file`).addEventListener("change", (event) => {
       addFiles([...event.target.files], kind);
       event.target.value = "";
     });
   }
   $2("#new-entry").addEventListener("click", () => createEntry());
+  $2("#delete-entry").addEventListener("click", deleteCurrentEntry);
   $2("#import-markdown").addEventListener("click", () => $2("#markdown-file").click());
   $2("#markdown-file").addEventListener("change", (event) => {
     importFile(event.target.files[0]);
@@ -5740,7 +5845,7 @@ async function boot() {
     initial.forEach((entry) => {
       entry.order ??= originalOrder.includes(entry.id) ? originalOrder.indexOf(entry.id) : 5;
     });
-    initial.sort((a3, b) => a3.order - b.order).forEach((entry) => entries2.set(entry.id, entry));
+    initial.filter((entry) => !entry.deleted).sort((a3, b) => a3.order - b.order).forEach((entry) => entries2.set(entry.id, entry));
     bindEvents();
     route();
   } catch (error) {
