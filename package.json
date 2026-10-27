@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "esbuild src/app.js --bundle --format=esm --outfile=script.js",
-    "start": "python3 -m http.server 4183 --bind 127.0.0.1"
+    "start": "python3 server.py"
   },
   "dependencies": {
     "dompurify": "^3.4.17",

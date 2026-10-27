@@ -5053,6 +5053,147 @@ function unzipSync(data, opts) {
   return files;
 }
 
+// src/youtube.js
+var players = /* @__PURE__ */ new Map();
+var apiReady;
+function loadYouTubeAPI() {
+  if (window.YT?.Player) return Promise.resolve(window.YT);
+  if (apiReady) return apiReady;
+  apiReady = new Promise((resolve, reject) => {
+    window.onYouTubeIframeAPIReady = () => resolve(window.YT);
+    const script = document.createElement("script");
+    script.src = "https://www.youtube.com/iframe_api";
+    script.async = true;
+    script.onerror = () => {
+      apiReady = null;
+      script.remove();
+      reject(new Error("YouTube player could not load. Reload to try again."));
+    };
+    document.head.append(script);
+  });
+  return apiReady;
+}
+async function mountYouTubePlayers(root2) {
+  const pending = [...root2.querySelectorAll("iframe[data-youtube-src]")].filter((frame) => frame.isConnected && !players.has(frame)).map((frame) => {
+    const record = { frame, player: null };
+    players.set(frame, record);
+    return record;
+  });
+  if (!pending.length) return;
+  let api;
+  try {
+    api = await loadYouTubeAPI();
+  } catch (error) {
+    pending.forEach((record) => {
+      if (players.get(record.frame) === record) players.delete(record.frame);
+    });
+    throw error;
+  }
+  for (const record of pending) {
+    const { frame } = record;
+    if (players.get(frame) !== record) continue;
+    if (!frame.isConnected) {
+      players.delete(frame);
+      continue;
+    }
+    frame.src = frame.dataset.youtubeSrc;
+    record.player = new api.Player(frame, {
+      events: {
+        onReady(event) {
+          if (players.get(frame) === record && frame.isConnected) event.target.mute();
+        }
+      }
+    });
+  }
+}
+function unmountYouTubePlayers(root2) {
+  for (const [frame, record] of players) {
+    if (root2 && !root2.contains(frame)) continue;
+    players.delete(frame);
+    record.player?.destroy();
+    frame.remove();
+  }
+}
+
+// src/routes.js
+function gardenPath(value) {
+  const path = value.startsWith("#") ? `/${value.slice(1)}` : value;
+  if (path === "/") return "/";
+  if (/^\/(?:pages|editor)\/?$/.test(path) || /^\/(?:page|editor)\/[A-Za-z0-9_-]+\/?$/.test(path)) return path.replace(/\/$/, "");
+  return null;
+}
+function cleanMarkdownLinks(markdown) {
+  return markdown.replace(/\]\((#(?:pages|editor|(?:page|editor)\/[A-Za-z0-9_-]+))\)/g, (match, target) => `](${gardenPath(target)})`);
+}
+
+// src/media-editing.js
+function meaningfulSibling(node, direction) {
+  let sibling = node[direction];
+  while (sibling && (sibling.nodeType === 8 || sibling.nodeType === 3 && !sibling.textContent.trim())) sibling = sibling[direction];
+  return sibling;
+}
+function endsInMedia(root2) {
+  let node = root2.lastChild;
+  while (node) {
+    if (node.nodeType === 8 || node.nodeType === 3 && !node.textContent.trim()) {
+      node = node.previousSibling;
+      continue;
+    }
+    if (node.nodeType !== 1) return false;
+    if (node.hasAttribute("data-media-kind")) return true;
+    node = node.lastChild;
+  }
+  return false;
+}
+function createTextLine(document2) {
+  const line = document2.createElement("p");
+  line.setAttribute("data-editor-line", "");
+  line.appendChild(document2.createElement("br"));
+  return line;
+}
+function isEmptyTextLine(node) {
+  return node?.nodeType === 1 && !node.textContent.trim() && !node.querySelector("img,video,iframe,[data-media-kind],hr");
+}
+function ensureTrailingTextLine(root2) {
+  if (!endsInMedia(root2)) return null;
+  const line = createTextLine(root2.ownerDocument);
+  root2.appendChild(line);
+  return line;
+}
+function caretTargetBesideMedia(media, before = false) {
+  const sibling = meaningfulSibling(media, before ? "previousSibling" : "nextSibling");
+  if (sibling?.nodeType === 3) return sibling;
+  if (sibling?.nodeType === 1 && /^(P|DIV|H[1-6]|BLOCKQUOTE|LI)$/.test(sibling.tagName) && sibling.getAttribute("contenteditable") !== "false" && !sibling.hasAttribute("data-media-kind") && !sibling.querySelector("[data-media-kind]")) return sibling;
+  const line = createTextLine(media.ownerDocument);
+  let anchor = media;
+  for (let parent = media.parentElement; parent; parent = parent.parentElement) {
+    if (parent.tagName === "P") {
+      anchor = parent;
+      break;
+    }
+  }
+  anchor.parentNode.insertBefore(line, before ? anchor : anchor.nextSibling);
+  return line;
+}
+function focusTextCaret(editor, target, atEnd = false) {
+  editor.focus({ preventScroll: true });
+  const range = editor.ownerDocument.createRange();
+  range.selectNodeContents(target);
+  range.collapse(!atEnd || isEmptyTextLine(target));
+  const selection = editor.ownerDocument.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return range;
+}
+function editorContentHTML(editor) {
+  const copy = editor.cloneNode(true);
+  copy.querySelectorAll("[data-editor-line]").forEach((line) => {
+    if (isEmptyTextLine(line)) line.parentNode.removeChild(line);
+    else line.removeAttribute("data-editor-line");
+  });
+  return copy.innerHTML;
+}
+
 // src/app.js
 var $2 = (selector) => document.querySelector(selector);
 var body = $2("#writing-body");
@@ -5060,6 +5201,8 @@ var titleInput = $2("#entry-title");
 var entries2 = /* @__PURE__ */ new Map();
 var assets = /* @__PURE__ */ new Map();
 var urls = /* @__PURE__ */ new Map();
+var HOME_ID = "__garden_home__";
+var homeEntry;
 var db;
 var activeId;
 var savedRange;
@@ -5073,7 +5216,8 @@ var escapeHTML = (value) => String(value).replace(/[&<>"']/g, (c2) => ({ "&": "&
 var slug = (value) => value.normalize("NFKD").replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 90) || "page";
 var mdDestination = (value) => value.replace(/ /g, "%20").replace(/\(/g, "%28").replace(/\)/g, "%29");
 var mdLabel = (value) => String(value).replace(/[\\[\]]/g, "\\$&");
-var titleFor = (entry) => entry.title.trim() || "Untitled page";
+var titleFor = (entry) => entry.title.trim() || (entry.id === HOME_ID ? "Home" : "Untitled page");
+var currentEntry = () => activeId === HOME_ID ? homeEntry : entries2.get(activeId);
 function notice(message, error = false) {
   clearTimeout(noticeTimer);
   $2("#notice").textContent = message;
@@ -5128,7 +5272,7 @@ function persist(entry) {
   });
 }
 function safeURL(value) {
-  return /^(https?:\/\/|mailto:|#)/i.test(value) || /^\.?\/?assets\//.test(value);
+  return /^(https?:\/\/|mailto:|#)/i.test(value) || /^\.?\/?assets\//.test(value) || !!gardenPath(value);
 }
 function youtubeID(value) {
   try {
@@ -5136,7 +5280,7 @@ function youtubeID(value) {
     if (!["https:", "http:"].includes(url.protocol)) return null;
     let id;
     if (["youtu.be", "www.youtu.be"].includes(url.hostname)) id = url.pathname.split("/")[1];
-    if (["youtube.com", "www.youtube.com", "m.youtube.com"].includes(url.hostname)) {
+    if (["youtube.com", "www.youtube.com", "m.youtube.com", "youtube-nocookie.com", "www.youtube-nocookie.com"].includes(url.hostname)) {
       id = url.pathname === "/watch" ? url.searchParams.get("v") : /^\/(embed|shorts|live)\//.test(url.pathname) ? url.pathname.split("/")[2] : null;
     }
     return /^[a-zA-Z0-9_-]{11}$/.test(id || "") ? id : null;
@@ -5145,7 +5289,7 @@ function youtubeID(value) {
   }
 }
 function assetURL(path) {
-  if (path === "./sample.svg" || path === "sample.svg") return "./sample.svg";
+  if (path === "./sample.svg" || path === "sample.svg") return "/sample.svg";
   if (!assets.has(path)) return null;
   if (!urls.has(path)) urls.set(path, URL.createObjectURL(assets.get(path).blob));
   return urls.get(path);
@@ -5159,7 +5303,28 @@ function mediaBlock(kind, ref, label, editing) {
   if (editing) {
     card.contentEditable = "false";
     card.tabIndex = 0;
-    card.setAttribute("aria-label", kind === "youtube" ? "YouTube reference" : `${kind === "image" ? "Image" : "Video"}${label ? `: ${label}` : ""}`);
+    card.setAttribute("aria-label", kind === "youtube" ? "YouTube video" : `${kind === "image" ? "Image" : "Video"}${label ? `: ${label}` : ""}`);
+    const remove2 = document.createElement("button");
+    remove2.type = "button";
+    remove2.className = "media-delete";
+    const action = kind === "image" ? "Remove image" : "Remove video";
+    remove2.setAttribute("aria-label", action);
+    remove2.title = action;
+    remove2.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg>';
+    card.append(remove2);
+  }
+  const videoId = kind === "youtube" ? youtubeID(ref) : null;
+  if (videoId) {
+    const player = document.createElement("iframe");
+    player.dataset.youtubeSrc = `https://www.youtube-nocookie.com/embed/${videoId}?enablejsapi=1&autoplay=0&origin=${encodeURIComponent(location.origin)}`;
+    player.title = "YouTube video player";
+    player.width = "560";
+    player.height = "315";
+    player.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share";
+    player.allowFullscreen = true;
+    player.referrerPolicy = "strict-origin-when-cross-origin";
+    card.append(player);
+    return card;
   }
   const media = kind === "youtube" ? null : assetURL(ref);
   if (kind === "image" && media) {
@@ -5172,15 +5337,17 @@ function mediaBlock(kind, ref, label, editing) {
     video.src = media;
     video.controls = true;
     video.preload = "metadata";
+    video.defaultMuted = true;
+    video.muted = true;
     card.append(video);
   }
-  if (kind === "youtube" || !media) {
+  if (!media) {
     const name = document.createElement("span");
     name.className = "media-title";
-    name.textContent = kind === "youtube" ? "\u25B7 YouTube video \xB7 local placeholder" : label || (kind === "image" ? "Image reference" : "Video reference");
+    name.textContent = label || (kind === "image" ? "Image reference" : "Video reference");
     const detail = document.createElement("span");
     detail.className = "media-detail";
-    detail.textContent = kind === "youtube" ? ref : `${ref} \xB7 Media file not available locally. Import its garden ZIP to restore it.`;
+    detail.textContent = kind === "youtube" ? "Unsupported YouTube URL." : `${ref} \xB7 Media file not available locally. Import its garden ZIP to restore it.`;
     card.append(name, detail);
   }
   return card;
@@ -5198,7 +5365,12 @@ function renderMarkdown(markdown, editing = false) {
     else image.replaceWith(card);
   });
   template.content.querySelectorAll("a").forEach((link) => {
-    const ref = link.getAttribute("href") || "";
+    let ref = link.getAttribute("href") || "";
+    const internalPath = gardenPath(ref);
+    if (internalPath) {
+      ref = internalPath;
+      link.setAttribute("href", ref);
+    }
     const ownLine = link.parentElement?.tagName === "P" && link.parentElement.textContent.trim() === link.textContent.trim();
     if (ownLine && youtubeID(ref)) link.parentElement.replaceWith(mediaBlock("youtube", ref, "", editing));
     else if (ownLine && (/^Video:/i.test(link.textContent) || /\.(mp4|webm|mov|m4v|ogv)(?:[?#]|$)/i.test(ref))) link.parentElement.replaceWith(mediaBlock("video", ref, link.textContent.replace(/^Video:\s*/i, ""), editing));
@@ -5208,6 +5380,7 @@ function renderMarkdown(markdown, editing = false) {
   template.content.querySelectorAll("p").forEach((p) => {
     if (!p.querySelector("*") && youtubeID(p.textContent.trim())) p.replaceWith(mediaBlock("youtube", p.textContent.trim(), "", editing));
   });
+  if (editing) ensureTrailingTextLine(template.content);
   return template.content;
 }
 var turndown = new TurndownService({ headingStyle: "atx", bulletListMarker: "-", codeBlockStyle: "fenced" });
@@ -5224,25 +5397,36 @@ ${kind === "youtube" ? ref : kind === "image" ? `![${label}](${ref})` : `[Video:
 });
 function saveEditor() {
   if (!activeId || activeId === deletingId || $2("#editor-shell").hidden) return;
-  const entry = entries2.get(activeId);
+  ensureTrailingTextLine(body);
+  const entry = currentEntry();
   entry.title = titleInput.value;
-  entry.markdown = turndown.turndown(body.innerHTML);
-  document.querySelector(`#editor-pages a[data-id="${activeId}"]`).textContent = titleFor(entry);
+  entry.markdown = turndown.turndown(editorContentHTML(body));
+  if (activeId !== HOME_ID) document.querySelector(`#editor-pages a[data-id="${activeId}"]`).textContent = titleFor(entry);
   persist(entry);
 }
+function removeMedia(media) {
+  const target = caretTargetBesideMedia(media);
+  unmountYouTubePlayers(media);
+  media.remove();
+  savedRange = focusTextCaret(body, target).cloneRange();
+  saveEditor();
+}
 function renderNavigation() {
+  if (activeId === HOME_ID) $2("#editor-home").setAttribute("aria-current", "page");
+  else $2("#editor-home").removeAttribute("aria-current");
+  $2("#import-markdown").textContent = activeId === HOME_ID ? "Import Home Markdown\u2026" : "Import Markdown\u2026";
   $2("#editor-pages").replaceChildren();
   $2(".page-shelf nav").replaceChildren();
   $2(".all-pages").replaceChildren();
   for (const entry of entries2.values()) {
     const link = document.createElement("a");
-    link.href = `#editor/${entry.id}`;
+    link.href = `/editor/${entry.id}`;
     link.dataset.id = entry.id;
     link.textContent = titleFor(entry);
     if (activeId === entry.id) link.setAttribute("aria-current", "page");
     $2("#editor-pages").append(link);
     const publicLink = document.createElement("a");
-    publicLink.href = `#page/${entry.id}`;
+    publicLink.href = `/page/${entry.id}`;
     publicLink.dataset.page = entry.id;
     publicLink.textContent = titleFor(entry);
     if ($2(".page-shelf nav").childElementCount < 8) $2(".page-shelf nav").append(publicLink.cloneNode(true));
@@ -5252,93 +5436,70 @@ function renderNavigation() {
   }
 }
 function updateHome() {
-  for (const [id, selector] of [["note", ".small-note"], ["link", ".saved-link"], ["unfinished", ".unfinished"]]) {
-    const entry2 = entries2.get(id), section = $2(selector);
-    section.hidden = !entry2;
-    if (!entry2) continue;
-    section.querySelector("h2 a").textContent = titleFor(entry2);
-    const fragment = renderMarkdown(entry2.markdown);
-    fragment.querySelectorAll("br").forEach((br) => br.replaceWith("\n"));
-    const paragraphs = [...fragment.querySelectorAll("p")];
-    const preview = id === "link" && paragraphs.length > 1 ? paragraphs[1].textContent : paragraphs[0]?.textContent || fragment.textContent;
-    section.querySelector("p").textContent = preview.trim().slice(0, 160) || "An open page.";
-    if (id === "link") {
-      const link = fragment.querySelector("a[href]");
-      try {
-        section.querySelector(".link-domain").textContent = new URL(link?.getAttribute("href")).hostname;
-      } catch {
-        section.querySelector(".link-domain").textContent = "";
-      }
-    }
+  $2("#home-title").textContent = titleFor(homeEntry);
+  $2("#home-content").replaceChildren(renderMarkdown(homeEntry.markdown));
+}
+function migrateLegacyURL() {
+  const path = location.hash ? gardenPath(location.hash) : null;
+  if (path) {
+    history.replaceState(null, "", path + location.search);
+    return true;
   }
-  const entry = entries2.get("image");
-  $2(".image-fragment").hidden = !entry;
-  if (entry) {
-    $2(".image-fragment figcaption a").textContent = titleFor(entry);
-    const match = entry.markdown.match(/!\[[^\]]*\]\(([^)]+)\)/);
-    const src = match && assetURL(match[1]);
-    $2(".image-fragment img").hidden = !src;
-    if (src) {
-      $2(".image-fragment img").src = src;
-      $2(".image-fragment img").alt = renderMarkdown(entry.markdown).querySelector("img")?.alt || titleFor(entry);
-    }
+  if (location.href.endsWith("#")) {
+    history.replaceState(null, "", location.pathname + location.search);
+    return true;
   }
-  const first = entries2.get("untitled") || entries2.values().next().value;
-  $2(".intro p:last-child").hidden = !first;
-  if (first) {
-    $2(".intro a").textContent = titleFor(first).toLowerCase();
-    $2(".intro a").href = `#page/${first.id}`;
-  }
+  return false;
 }
 function route(focus = false) {
   closeWritingMenu();
   closeBlockMenu();
-  if (location.hash === "#main") {
-    $2("#main").focus();
-    return;
-  }
+  unmountYouTubePlayers();
+  document.querySelectorAll('[data-media-kind="youtube"] iframe').forEach((player) => player.remove());
   body.querySelectorAll("video").forEach((video) => video.pause());
   $2("#page-content").querySelectorAll("video").forEach((video) => video.pause());
-  const hash = location.hash;
-  const editing = /^#editor(?:\/|$)/.test(hash);
-  const id = editing ? hash.slice(8) : hash.startsWith("#page/") ? hash.slice(6) : "";
+  $2("#home-content").querySelectorAll("video").forEach((video) => video.pause());
+  const path = gardenPath(location.pathname) || "/";
+  const editing = /^\/editor(?:\/|$)/.test(path);
+  const id = editing ? path.slice(8) : path.startsWith("/page/") ? path.slice(6) : "";
   $2(".site").hidden = editing;
   $2("#editor-shell").hidden = !editing;
   if (editing) {
-    activeId = entries2.has(id) ? id : entries2.keys().next().value;
-    const entry = entries2.get(activeId);
+    activeId = !id || id === "home" ? HOME_ID : entries2.has(id) ? id : entries2.keys().next().value || HOME_ID;
+    const entry = currentEntry();
+    $2("#delete-entry").hidden = activeId === HOME_ID;
     $2("#editor-document").hidden = !entry;
     $2("#editor-empty").hidden = !!entry;
     titleInput.value = entry?.title || "";
     body.replaceChildren(entry ? renderMarkdown(entry.markdown, true) : document.createDocumentFragment());
     savedRange = null;
     setBlockFormat("p");
-    $2("#preview-entry").href = entry ? `#page/${activeId}` : "#";
+    $2("#preview-entry").href = activeId === HOME_ID ? "/" : entry ? `/page/${activeId}` : "/";
     document.title = entry ? `${titleFor(entry)} \u2014 Local editor` : "Local editor \u2014 Peter";
   } else {
     activeId = null;
     const entry = entries2.get(id);
-    const view = entry ? "page" : hash === "#pages" ? "pages" : "home";
+    const view = entry ? "page" : path === "/pages" ? "pages" : "home";
     document.querySelectorAll(".view").forEach((section) => {
       section.hidden = section.id !== `${view}-view`;
     });
     if (entry) {
       $2("#page-title").textContent = titleFor(entry);
       $2("#page-content").replaceChildren(renderMarkdown(entry.markdown));
-      $2("#edit-this-page").href = `#editor/${entry.id}`;
       const related = entries2.get(entry.related) || [...entries2.values()].find((item) => item.id !== entry.id);
       $2(".page-connections").hidden = !related;
       if (related) {
         $2("#related-page").textContent = titleFor(related);
-        $2("#related-page").href = `#page/${related.id}`;
+        $2("#related-page").href = `/page/${related.id}`;
       }
     }
-    document.title = `${entry ? titleFor(entry) : view === "pages" ? "All Pages" : "Home"} \u2014 Peter`;
-    updateHome();
+    document.title = `${entry ? titleFor(entry) : view === "pages" ? "All Pages" : titleFor(homeEntry)} \u2014 Peter`;
+    if (view === "home") updateHome();
   }
   renderNavigation();
+  mountYouTubePlayers(editing ? body : $2("#home-view").hidden ? $2("#page-content") : $2("#home-content")).catch((error) => notice(error.message, true));
   document.querySelectorAll("[data-page]").forEach((link) => {
-    if (link.dataset.page === (entries2.has(id) ? id : hash === "#pages" ? "pages" : "home")) link.setAttribute("aria-current", "page");
+    if (link.dataset.page === (entries2.has(id) ? id : path === "/pages" ? "pages" : "home")) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   });
   if (focus) {
@@ -5475,11 +5636,13 @@ function insertNode(node) {
     node.after(after);
     range.setStart(after, 0);
   }
+  ensureTrailingTextLine(body);
   range.collapse(true);
   selection.removeAllRanges();
   selection.addRange(range);
   savedRange = range.cloneRange();
   saveEditor();
+  mountYouTubePlayers(node).catch((error) => notice(error.message, true));
 }
 function textInsert(text2) {
   restoreSelection();
@@ -5492,11 +5655,11 @@ function showInsert(mode) {
   const selection = window.getSelection().toString();
   $2("#insert-form").reset();
   $2("#insert-error").textContent = "";
-  $2("#insert-title").textContent = mode === "youtube" ? "Add a YouTube reference" : "Add a link";
+  $2("#insert-title").textContent = mode === "youtube" ? "Add a YouTube video" : "Add a link";
   $2("#url-label").textContent = mode === "youtube" ? "YouTube URL" : "URL or garden page link";
   $2("#caption-label").hidden = $2("#insert-caption").hidden = mode === "youtube";
   $2("#insert-caption").value = selection;
-  $2("#insert-help").textContent = mode === "youtube" ? "Adds a placeholder. No upload or remote player. The URL stays plain text in Markdown." : "Use https://example.com or a garden link such as #page/note.";
+  $2("#insert-help").textContent = mode === "youtube" ? "Paste a YouTube link to preview it here." : "Use https://example.com or a garden link such as /page/note.";
   $2("#insert-dialog").showModal();
   $2("#insert-url").focus();
 }
@@ -5541,12 +5704,12 @@ function download(blob, name) {
 function exportedMarkdown(entry) {
   return `# ${titleFor(entry).replace(/[\r\n]/g, " ")}
 
-${entry.markdown}
+${cleanMarkdownLinks(entry.markdown)}
 `;
 }
 async function exportEntry(bundle) {
   saveEditor();
-  const entry = { ...entries2.get(activeId) }, filename = `${slug(titleFor(entry))}.md`;
+  const entry = { ...currentEntry() }, filename = `${slug(titleFor(entry))}.md`;
   if (!bundle) {
     download(new Blob([exportedMarkdown(entry)], { type: "text/markdown;charset=utf-8" }), filename);
     notice("Markdown exported. Local media paths need the matching files; use the ZIP to include them.");
@@ -5559,7 +5722,7 @@ async function exportEntry(bundle) {
     const missing = [];
     for (const ref of new Set(refs)) {
       if (assets.has(ref)) files[ref] = new Uint8Array(await assets.get(ref).blob.arrayBuffer());
-      else if (ref === "./sample.svg" || ref === "sample.svg") files["sample.svg"] = new Uint8Array(await (await fetch("./sample.svg")).arrayBuffer());
+      else if (ref === "./sample.svg" || ref === "sample.svg") files["sample.svg"] = new Uint8Array(await (await fetch("/sample.svg")).arrayBuffer());
       else if (!youtubeID(ref)) missing.push(ref);
     }
     files["README.txt"] = strToU8("This local garden export contains a Markdown page and its available local media.\nImport the ZIP into the local editor to restore both. The first # heading is the title.\nImages: ![description](assets/file.png)\nVideos: [Video: description](assets/file.mp4)\nYouTube: a plain URL on its own line; no player or upload is included.\n" + (missing.length ? `
@@ -5575,14 +5738,14 @@ ${missing.join("\n")}
 async function createEntry(title = "", markdown = "") {
   const entry = { id: crypto.randomUUID(), title, markdown, related: entries2.keys().next().value, order: Math.max(-1, ...[...entries2.values()].map((item) => item.order ?? 0)) + 1 };
   entries2.set(entry.id, entry);
-  history.pushState(null, "", `#editor/${entry.id}`);
+  history.pushState(null, "", `/editor/${entry.id}`);
   route(true);
   titleInput.focus();
   await persist(entry);
 }
 async function deleteCurrentEntry() {
   const id = activeId;
-  if (!id || !entries2.has(id) || deletingId) return;
+  if (!id || id === HOME_ID || !entries2.has(id) || deletingId) return;
   deletingId = id;
   $2("#delete-entry").disabled = true;
   pendingWrites++;
@@ -5591,11 +5754,10 @@ async function deleteCurrentEntry() {
     entries2.delete(id);
     if (activeId === id) {
       const nextId = entries2.keys().next().value;
-      history.replaceState(null, "", nextId ? `#editor/${nextId}` : "#editor");
+      history.replaceState(null, "", nextId ? `/editor/${nextId}` : "/editor");
       route(true);
     } else if ($2("#editor-shell").hidden) route();
     else renderNavigation();
-    notice("Page deleted.");
   } catch {
     notice("Could not delete this page. It has been kept.", true);
   } finally {
@@ -5606,6 +5768,7 @@ async function deleteCurrentEntry() {
 }
 async function importFile(file) {
   if (!file) return;
+  const importingHome = activeId === HOME_ID;
   if (file.size > 100 * 1024 * 1024) {
     notice("Choose a Markdown file or garden ZIP smaller than 100 MB.", true);
     return;
@@ -5650,15 +5813,44 @@ async function importFile(file) {
     const firstHeading = markdown.match(/^# (.+)\n?/);
     const title = firstHeading ? firstHeading[1].trim() : filename.split("/").pop().replace(/\.(md|markdown)$/i, "").replace(/[-_]/g, " ");
     if (firstHeading) markdown = markdown.slice(firstHeading[0].length).trimStart();
-    await createEntry(title, markdown);
-    notice("Imported as a new page. Your other pages are kept.");
+    if (importingHome) {
+      homeEntry = { ...homeEntry, title, markdown };
+      await persist(homeEntry);
+      history.pushState(null, "", "/editor/home");
+      route(true);
+      notice("Home imported.");
+    } else {
+      await createEntry(title, markdown);
+      notice("Imported as a new page. Your other pages are kept.");
+    }
   } catch (error) {
     notice(error.message || "Could not import this file.", true);
   }
 }
 function bindEvents() {
   document.execCommand("defaultParagraphSeparator", false, "p");
-  window.addEventListener("hashchange", () => route(true));
+  window.addEventListener("popstate", () => {
+    migrateLegacyURL();
+    route(true);
+  });
+  window.addEventListener("hashchange", () => {
+    if (migrateLegacyURL()) route(true);
+  });
+  document.addEventListener("click", (event) => {
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = event.target.closest("a[href]");
+    if (!link || link.hasAttribute("download") || link.target && link.target !== "_self") return;
+    if (link.classList.contains("skip-link")) {
+      event.preventDefault();
+      ($2("#editor-shell").hidden ? $2("#main") : body).focus();
+      return;
+    }
+    const url = new URL(link.href, location.href);
+    if (url.origin !== location.origin || url.hash || !gardenPath(url.pathname)) return;
+    event.preventDefault();
+    if (url.pathname !== location.pathname || url.search !== location.search || location.hash) history.pushState(null, "", url.pathname + url.search);
+    route(true);
+  });
   window.addEventListener("beforeunload", (event) => {
     if (pendingWrites || saveFailed) {
       event.preventDefault();
@@ -5749,16 +5941,37 @@ function bindEvents() {
   window.addEventListener("blur", () => closeWritingMenu());
   body.addEventListener("input", saveEditor);
   body.addEventListener("click", (event) => {
+    const remove2 = event.target.closest(".media-delete");
+    if (remove2) {
+      event.preventDefault();
+      removeMedia(remove2.closest("[data-media-kind]"));
+      return;
+    }
     const media = event.target.closest("[data-media-kind]");
-    if (media && !event.target.closest("video")) media.focus({ preventScroll: true });
+    if (media && !event.target.closest("video, iframe, a, button")) media.focus({ preventScroll: true });
+    if (event.target === body) {
+      ensureTrailingTextLine(body);
+      const last = body.lastElementChild;
+      if (last) {
+        const previous = last.previousElementSibling;
+        const bottom = isEmptyTextLine(last) && previous?.hasAttribute("data-media-kind") ? previous.getBoundingClientRect().bottom : last.getBoundingClientRect().bottom;
+        if (event.clientY >= bottom) savedRange = focusTextCaret(body, last.hasAttribute("data-media-kind") ? body : last, true).cloneRange();
+      }
+    }
     if (event.target.closest("a")) event.preventDefault();
   });
   body.addEventListener("keydown", (event) => {
+    if (event.target.matches("[data-media-kind]") && !event.isComposing && !event.metaKey && !event.ctrlKey && !event.altKey && ["Enter", "ArrowDown", "ArrowUp"].includes(event.key)) {
+      event.preventDefault();
+      const before = event.key === "ArrowUp";
+      savedRange = focusTextCaret(body, caretTargetBesideMedia(event.target, before), before).cloneRange();
+      ensureTrailingTextLine(body);
+      syncBlockFormat();
+      return;
+    }
     if (event.target.matches("[data-media-kind]") && ["Backspace", "Delete"].includes(event.key)) {
       event.preventDefault();
-      event.target.remove();
-      body.focus();
-      saveEditor();
+      removeMedia(event.target);
     }
   });
   body.addEventListener("paste", (event) => {
@@ -5792,7 +6005,7 @@ function bindEvents() {
     event.preventDefault();
     const url = $2("#insert-url").value.trim();
     if (insertMode === "youtube" ? !youtubeID(url) : !safeURL(url)) {
-      $2("#insert-error").textContent = insertMode === "youtube" ? "Enter a YouTube watch, short, or youtu.be URL." : "Use an https://, http://, mailto:, or #page/ URL.";
+      $2("#insert-error").textContent = insertMode === "youtube" ? "Enter a YouTube watch, short, or youtu.be URL." : "Use an https://, http://, mailto:, or /page/ URL.";
       return;
     }
     $2("#insert-dialog").close();
@@ -5836,17 +6049,25 @@ async function boot() {
     storedAssets.forEach((asset) => assets.set(asset.path, asset));
     let initial = storedEntries;
     if (!initial.length) {
-      const response = await fetch("./content/entries.json");
+      const response = await fetch("/content/entries.json");
       if (!response.ok) throw new Error("Could not load the sample pages.");
       initial = (await response.json()).map((entry, order) => ({ ...entry, order }));
       await writeRecords("entries", initial);
+    }
+    homeEntry = initial.find((entry) => entry.id === HOME_ID && !entry.deleted);
+    if (!homeEntry) {
+      const response = await fetch("/content/home.json");
+      if (!response.ok) throw new Error("Could not load Home.");
+      homeEntry = { ...await response.json(), id: HOME_ID };
+      await writeRecords("entries", [homeEntry]);
     }
     const originalOrder = ["untitled", "note", "link", "image", "unfinished"];
     initial.forEach((entry) => {
       entry.order ??= originalOrder.includes(entry.id) ? originalOrder.indexOf(entry.id) : 5;
     });
-    initial.filter((entry) => !entry.deleted).sort((a3, b) => a3.order - b.order).forEach((entry) => entries2.set(entry.id, entry));
+    initial.filter((entry) => entry.id !== HOME_ID && !entry.deleted).sort((a3, b) => a3.order - b.order).forEach((entry) => entries2.set(entry.id, entry));
     bindEvents();
+    migrateLegacyURL();
     route();
   } catch (error) {
     notice(`The local editor could not start. ${error.message || "Browser storage is unavailable."} Try a regular browser window with storage enabled.`, true);

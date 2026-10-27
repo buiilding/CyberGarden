@@ -3,7 +3,7 @@
     "id": "untitled",
     "title": "An untitled page",
     "related": "note",
-    "markdown": "This is a sample page. It can hold a longer piece of writing, a picture, a link, or something unfinished.\n\nThere is no required structure. A page can change over time.\n\n## A section, if needed\n\nText can connect to [a small note](#page/note) or [a saved link](#page/link). Those pages can be small enough to stand on their own.\n\n- A line of text.\n- Something to come back to.\n- A link to [an unfinished page](#page/unfinished).\n\n## A place for a video\n\nhttps://www.youtube.com/watch?v=jfKfPfyJRdk\n\nA sample video reference. It stays a quiet placeholder in this local prototype."
+    "markdown": "This is a sample page. It can hold a longer piece of writing, a picture, a link, or something unfinished.\n\nThere is no required structure. A page can change over time.\n\n## A section, if needed\n\nText can connect to [a small note](/page/note) or [a saved link](/page/link). Those pages can be small enough to stand on their own.\n\n- A line of text.\n- Something to come back to.\n- A link to [an unfinished page](/page/unfinished).\n\n## A place for a video\n\nhttps://www.youtube.com/watch?v=jfKfPfyJRdk\n\nA sample video. Its original URL stays in the Markdown."
   },
   {
     "id": "note",

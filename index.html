@@ -5,37 +5,31 @@
 <meta name="theme-color" content="#fafafa"><meta name="description" content="A local personal website prototype with neutral placeholder pages.">
 <title>Home — Peter</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='5' y='5' width='22' height='22' fill='%23fafafa' stroke='%23484a64'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="./style.css"><script src="./script.js" type="module"></script>
+<link rel="stylesheet" href="/style.css"><script src="/script.js" type="module"></script>
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
 <div class="site">
 <aside class="sidebar">
-<a class="site-name" href="#">Peter</a>
-<nav aria-label="Site navigation"><a href="#" data-page="home" aria-current="page">Home</a><a href="#pages" data-page="pages">All Pages</a></nav>
+<a class="site-name" href="/">Peter</a>
+<nav aria-label="Site navigation"><a href="/" data-page="home" aria-current="page">Home</a><a href="/pages" data-page="pages">All Pages</a></nav>
 <div class="page-shelf"><p class="quiet-label">a few pages</p><nav aria-label="Pages"></nav></div>
-<a class="editor-entry" href="#editor">Open local editor <span aria-hidden="true">↗</span></a>
+<a class="editor-entry" href="/editor">Open local editor <span aria-hidden="true">↗</span></a>
 </aside>
 <main id="main" tabindex="-1">
 <section id="home-view" class="view" aria-labelledby="home-title">
 <h1 id="home-title">Home</h1>
-<div class="intro"><p>A few things, in no particular order.</p><p>You can start with <a href="#page/untitled">a page</a>,<br class="desktop-break"> or take a look through <a href="#pages">all the pages</a>.</p></div>
-<div class="home-content">
-<section class="small-note" aria-labelledby="note-title"><h2 id="note-title"><a href="#page/note"></a></h2><p></p></section>
-<figure class="image-fragment"><a href="#page/image" aria-label="Open the sample image"><img alt="" width="720" height="480"></a><figcaption><a href="#page/image"></a><span>image</span></figcaption></figure>
-<section class="saved-link" aria-labelledby="link-title"><div class="quiet-label">a link</div><h2 id="link-title"><a href="#page/link"></a></h2><p></p><span class="link-domain"></span></section>
-<section class="unfinished" aria-labelledby="unfinished-title"><h2 id="unfinished-title"><a href="#page/unfinished"></a></h2><p></p></section>
-</div>
+<div id="home-content" class="document"></div>
 </section>
 <section id="pages-view" class="view" hidden aria-labelledby="pages-title"><h1 id="pages-title">All Pages</h1><p class="intro-line">Different things can live alongside each other.</p><ul class="all-pages"></ul></section>
-<article id="page-view" class="view document" hidden aria-labelledby="page-title"><div class="page-topline"><a class="back-link" href="#">← Home</a><a id="edit-this-page" class="back-link" href="#editor">Edit this page</a></div><h1 id="page-title"></h1><div id="page-content"></div><div class="page-connections"><span class="quiet-label">another page</span><a id="related-page" href="#"></a></div></article>
-<footer>Placeholder content for the prototype.</footer>
+<article id="page-view" class="view document" hidden aria-labelledby="page-title"><div class="page-topline"><a class="back-link" href="/">← Home</a></div><h1 id="page-title"></h1><div id="page-content"></div><div class="page-connections"><span class="quiet-label">another page</span><a id="related-page" href="/"></a></div></article>
 </main>
 </div>
 <section id="editor-shell" hidden aria-label="Local garden editor">
-  <header class="editor-header"><a class="editor-brand" href="#">Peter</a></header>
+  <header class="editor-header"><a class="editor-brand" href="/">Peter</a></header>
   <div class="editor-layout">
     <aside class="editor-sidebar">
+      <a id="editor-home" class="editor-home" href="/editor/home">Home</a>
       <div class="editor-nav-heading"><span class="quiet-label">your pages</span><button id="new-entry" class="text-button">+ New page</button></div>
       <nav id="editor-pages" aria-label="Edit a page"></nav>
       <div class="editor-import">
@@ -59,7 +53,7 @@
         <button data-command="bold" title="Bold (⌘/Ctrl B)" aria-label="Bold"><b>B</b></button>
       </div>
       <div id="writing-body" class="document writing-body" contenteditable="true" role="textbox" aria-label="Page content" aria-multiline="true" data-placeholder="Click here and start a page…" spellcheck="true"></div>
-      <div class="editor-bottom"><a id="preview-entry" href="#">Save ↗</a><button id="delete-entry" class="text-button" type="button" aria-label="Delete page">Delete <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></button></div>
+      <div class="editor-bottom"><a id="preview-entry" href="/">Save ↗</a><button id="delete-entry" class="text-button" type="button" aria-label="Delete page">Delete <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg></button></div>
       </div>
     </main>
   </div>
