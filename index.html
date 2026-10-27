@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#fafafa"><meta name="description" content="A local personal website prototype with neutral placeholder pages.">
+<title>Home — Peter</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='5' y='5' width='22' height='22' fill='%23fafafa' stroke='%23484a64'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="./style.css"><script src="./script.js" defer></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="site">
+<aside class="sidebar">
+<a class="site-name" href="#">Peter</a>
+<nav aria-label="Site navigation"><a href="#" data-page="home" aria-current="page">Home</a><a href="#pages" data-page="pages">All Pages</a></nav>
+<div class="page-shelf"><p class="quiet-label">a few pages</p><nav aria-label="Pages"><a href="#page/untitled" data-page="untitled">An untitled page</a><a href="#page/note" data-page="note">A small note</a><a href="#page/link" data-page="link">A saved link</a><a href="#page/image" data-page="image">A sample image</a><a href="#page/unfinished" data-page="unfinished">An unfinished page</a></nav></div>
+</aside>
+<main id="main" tabindex="-1">
+<section id="home-view" class="view" aria-labelledby="home-title">
+<h1 id="home-title">Home</h1>
+<div class="intro"><p>A few things, in no particular order.</p><p>You can start with <a href="#page/untitled">an untitled page</a>,<br class="desktop-break"> or take a look through <a href="#pages">all the pages</a>.</p></div>
+<div class="home-content">
+<section class="small-note" aria-labelledby="note-title"><h2 id="note-title"><a href="#page/note">A small note</a></h2><p>A short piece of sample text.<br>A second line, and that can be enough.</p></section>
+<figure class="image-fragment"><a href="#page/image" aria-label="Open the sample image"><img src="./sample.svg" alt="A neutral geometric placeholder: a blue rectangle and a pale circle on a gray field." width="720" height="480"></a><figcaption><a href="#page/image">A sample image</a><span>image</span></figcaption></figure>
+<section class="saved-link" aria-labelledby="link-title"><div class="quiet-label">a link</div><h2 id="link-title"><a href="#page/link">A saved link <span aria-hidden="true">↗</span></a></h2><p>An optional sentence to go with it.</p><span class="link-domain">example.com</span></section>
+<section class="unfinished" aria-labelledby="unfinished-title"><h2 id="unfinished-title"><a href="#page/unfinished">An unfinished page</a></h2><p>Just the beginning of something…</p></section>
+</div>
+</section>
+<section id="pages-view" class="view" hidden aria-labelledby="pages-title"><h1 id="pages-title">All Pages</h1><p class="intro-line">Different things can live alongside each other.</p><ul class="all-pages"><li><a href="#page/untitled">An untitled page</a><span>page</span></li><li><a href="#page/note">A small note</a><span>note</span></li><li><a href="#page/link">A saved link</a><span>link</span></li><li><a href="#page/image">A sample image</a><span>image</span></li><li><a href="#page/unfinished">An unfinished page</a><span>unfinished</span></li></ul></section>
+<article id="page-view" class="view document" hidden aria-labelledby="page-title"><a class="back-link" href="#">← Home</a><h1 id="page-title"></h1><div id="page-content"></div><div class="page-connections"><span class="quiet-label">another page</span><a id="related-page" href="#"></a></div></article>
+<footer>Placeholder content for the prototype.</footer>
+</main>
+</div>
+<template id="untitled-content"><p>This is a sample page. It can be a longer piece of writing, a list, a collection, or something else entirely.</p><p>There is no required structure. A page can change over time.</p><h2>A section, if needed</h2><p>Text can connect to <a href="#page/note">a small note</a> or <a href="#page/link">a saved link</a>. Those pages can be small enough to stand on their own.</p><ul><li>A line of text.</li><li>Something to come back to.</li><li>A link to <a href="#page/unfinished">an unfinished page</a>.</li></ul><pre><code>title: "An untitled page"
+content: "Your words here."</code></pre></template>
+<template id="note-content"><p>A short piece of sample text.<br>A second line, and that can be enough.</p></template>
+<template id="link-content"><p><a class="external-link" href="https://example.com" target="_blank" rel="noopener noreferrer">Example Domain ↗</a></p><p>An optional sentence to go with a link.</p><p class="document-note">This is a placeholder link.</p></template>
+<template id="image-content"><figure class="document-image"><img src="./sample.svg" alt="A neutral geometric placeholder: a blue rectangle and a pale circle on a gray field." width="720" height="480"><figcaption>A sample image. A caption can go here, if one is needed.</figcaption></figure></template>
+<template id="unfinished-content"><p>Just the beginning of something…</p></template>
+</body>
+</html>
