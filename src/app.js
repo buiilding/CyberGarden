@@ -5,6 +5,7 @@ import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate';
 import { mountYouTubePlayers, unmountYouTubePlayers } from './youtube.js';
 import { gardenPath, cleanMarkdownLinks } from './routes.js';
 import { ensureTrailingTextLine, caretTargetBesideMedia, focusTextCaret, editorContentHTML, isEmptyTextLine } from './media-editing.js';
+import { createPageReferencePicker } from './page-references.js';
 
 const $ = selector => document.querySelector(selector);
 const body = $('#writing-body');
@@ -14,6 +15,7 @@ const assets = new Map();
 const urls = new Map();
 const HOME_ID = '__garden_home__';
 let homeEntry;
+let pageReferencePicker;
 let db, activeId, savedRange, insertMode, revision = 0, pendingWrites = 0, saveFailed = false;
 let noticeTimer, deletingId = null;
 const escapeHTML = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -224,6 +226,7 @@ function migrateLegacyURL() {
   return false;
 }
 function route(focus = false) {
+  pageReferencePicker?.close();
   closeWritingMenu();
   closeBlockMenu();
   // Unload remote players when changing views so a hidden video cannot keep playing.
@@ -307,6 +310,7 @@ function closeBlockMenu(returnFocus = false) {
   if (returnFocus) $('#block-format').focus({ preventScroll: true });
 }
 function showBlockMenu(edge) {
+  pageReferencePicker?.close();
   closeWritingMenu();
   rememberSelection();
   syncBlockFormat();
@@ -323,6 +327,7 @@ function closeWritingMenu(returnFocus = false) {
   if (returnFocus) restoreSelection();
 }
 function showWritingMenu(event) {
+  pageReferencePicker?.close();
   event.preventDefault();
   closeBlockMenu();
   const menu = $('#writing-menu');
@@ -516,6 +521,16 @@ async function importFile(file) {
 }
 function bindEvents() {
   document.execCommand('defaultParagraphSeparator', false, 'p');
+  pageReferencePicker = createPageReferencePicker({
+    editor: body,
+    menu: $('#page-reference-menu'),
+    getPages: () => [
+      { id: HOME_ID, title: titleFor(homeEntry), href: '/' },
+      ...[...entries.values()].filter(entry => !entry.deleted).map(entry => ({ id: entry.id, title: titleFor(entry), href: `/page/${entry.id}` }))
+    ],
+    onOpen: () => { closeWritingMenu(); closeBlockMenu(); },
+    onChange: () => { rememberSelection(); saveEditor(); }
+  });
   window.addEventListener('popstate', () => { migrateLegacyURL(); route(true); });
   window.addEventListener('hashchange', () => { if (migrateLegacyURL()) route(true); });
   document.addEventListener('click', event => {

@@ -11,6 +11,7 @@ npm start
 Open **http://127.0.0.1:4183**. Use **Open local editor** in the sidebar. This control opens a mock editor directly; it is not real authentication. The editor is also at http://127.0.0.1:4183/editor. Clean routes such as `/pages`, `/editor`, and `/page/note` work when opened directly or refreshed. Older `#pages`, `#editor`, and `#page/...` bookmarks and Markdown links still work and resolve to clean paths.
 
 - Click into the page title or body and type. Use the toolbar for headings and bold. No Markdown or HTML typing is needed.
+- In the body of Home or any page, type `!` at the start of a line or after a space to find a page. Keep typing to search its title, including multiple words; use Up/Down and Enter, or click a result. The title becomes an underlined link and writing continues after it. Escape keeps your literal `!query`. Links export as ordinary Markdown, such as `[A small note](/page/note)`, with stable page IDs; Home links to `/`.
 - **Home** is fixed at the top of the editor sidebar and opens at `/editor/home` (also the default at `/editor`). Edit its title and body with the same text and media controls, then use **Save ↗** to open the homepage at `/`. Home is stored separately from ordinary pages and does not appear in All Pages.
 - Right-click inside the page body for **Add image**, **Upload video**, and **YouTube URL** at that position. Press Escape or click outside to dismiss the menu.
 - Paste an image from your clipboard at the text cursor, or choose **Add image**. Supported images: PNG, JPEG, GIF, WebP, AVIF.
@@ -67,5 +68,7 @@ To change application behavior, install the locked development dependencies and 
 npm ci
 npm run build
 ```
+
+Run `node --test tests/page-references.test.mjs` for focused page-picker checks. These use a DOM harness with simulated selection, geometry, and native editing; visual positioning and actual browser editing are left for local testing.
 
 The bundle contains marked, Turndown, DOMPurify, and fflate. Application dependencies are bundled locally; YouTube players load from YouTube when a video is shown. Keep the server bound to `127.0.0.1` for local review.
