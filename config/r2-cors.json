@@ -1,6 +1,6 @@
 [
   {
-    "AllowedOrigins": ["http://localhost:4183"],
+    "AllowedOrigins": ["http://localhost:4183", "https://cybergarden-preview-peterbuics-8590s-projects.vercel.app", "https://peterbuics.com"],
     "AllowedMethods": ["PUT", "GET", "HEAD"],
     "AllowedHeaders": ["Content-Type"],
     "ExposeHeaders": ["ETag"],

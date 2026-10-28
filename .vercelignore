@@ -1,0 +1,9 @@
+.env
+.env.*
+.git
+.venv
+node_modules
+tests
+output
+.playwright-cli
+__pycache__

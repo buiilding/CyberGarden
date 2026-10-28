@@ -1,3 +1,74 @@
+// src/cloud-pages.js
+var CloudPages = class {
+  constructor(request = (...args) => globalThis.fetch(...args), csrf = () => document.querySelector("#sign-out-csrf")?.value || "") {
+    this.request = request;
+    this.csrf = csrf;
+    this.enabled = false;
+    this.revisions = /* @__PURE__ */ new Map();
+    this.jobs = /* @__PURE__ */ new Map();
+    this.blocked = /* @__PURE__ */ new Map();
+  }
+  async load() {
+    const response = await this.request("/api/pages", { cache: "no-store" });
+    if (!response.ok) throw new Error("Cloud pages could not load. Your local content has been kept.");
+    const result = await response.json();
+    this.enabled = result.cloud === true;
+    for (const page of result.pages) this.revisions.set(page.id, page._revision);
+    return result;
+  }
+  async post(path, value) {
+    const response = await this.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf: this.csrf(), document: JSON.stringify(value) })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || "Could not save to Supabase. Keep this tab open and export your page.");
+    return result;
+  }
+  save(document2) {
+    if (this.blocked.has(document2.id)) return Promise.reject(this.blocked.get(document2.id));
+    let job = this.jobs.get(document2.id);
+    if (!job) {
+      job = { waiting: [], running: false };
+      this.jobs.set(document2.id, job);
+    }
+    job.latest = structuredClone(document2);
+    const promise = new Promise((resolve, reject) => job.waiting.push({ resolve, reject }));
+    if (!job.running) {
+      clearTimeout(job.timer);
+      job.timer = setTimeout(() => this.drain(document2.id, job), 300);
+    }
+    return promise;
+  }
+  async drain(id, job) {
+    if (job.running) return;
+    job.running = true;
+    while (job.latest) {
+      const document2 = job.latest, waiting = job.waiting;
+      job.latest = null;
+      job.waiting = [];
+      try {
+        const result = await this.post("/api/pages", { ...document2, _revision: this.revisions.get(id) || 0 });
+        this.revisions.set(id, result._revision);
+        waiting.forEach((w2) => w2.resolve(result));
+      } catch (error) {
+        this.blocked.set(id, error);
+        waiting.concat(job.waiting).forEach((w2) => w2.reject(error));
+        job.latest = null;
+        job.waiting = [];
+      }
+    }
+    job.running = false;
+    this.jobs.delete(id);
+  }
+  async import(pages) {
+    const result = await this.post("/api/import", pages);
+    for (const page of result) this.revisions.set(page.id, page._revision);
+    return result;
+  }
+};
+
 // src/r2-images.js
 var config = { configured: false, imageBaseURL: "", maxImageBytes: 40 * 1024 * 1024 };
 async function loadImageConfig(request = fetch) {
@@ -5902,6 +5973,8 @@ var entries2 = /* @__PURE__ */ new Map();
 var assets = /* @__PURE__ */ new Map();
 var urls = /* @__PURE__ */ new Map();
 var imageJobs = /* @__PURE__ */ new Map();
+var cloudPages = new CloudPages();
+var browserPagesForImport = [];
 var HOME_ID = "__garden_home__";
 var homeEntry;
 var pageReferencePicker;
@@ -5951,6 +6024,9 @@ function allRecords(store) {
   });
 }
 function writeRecords(store, records) {
+  if (store === "entries" && cloudPages.enabled) {
+    return Promise.all(records.map((record) => cloudPages.save(record)));
+  }
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(store, "readwrite");
     records.forEach((record) => transaction.objectStore(store).put(record));
@@ -5962,14 +6038,27 @@ function writeRecords(store, records) {
 function persist(entry) {
   const currentRevision = ++revision;
   pendingWrites++;
+  if (cloudPages.enabled) {
+    try {
+      localStorage.setItem(`cg-cloud-draft:${entry.id}`, JSON.stringify(entry));
+    } catch {
+    }
+  }
+  const snapshot = JSON.stringify(entry);
   return writeRecords("entries", [{ ...entry }]).then(() => {
+    if (cloudPages.enabled) {
+      try {
+        if (localStorage.getItem(`cg-cloud-draft:${entry.id}`) === snapshot) localStorage.removeItem(`cg-cloud-draft:${entry.id}`);
+      } catch {
+      }
+    }
     if (currentRevision === revision) {
       saveFailed = false;
     }
     return true;
   }).catch(() => {
     saveFailed = true;
-    notice("Browser storage could not save this change. Keep this tab open and export your page.", true);
+    notice(cloudPages.enabled ? "Cloud save failed. Keep this tab open and export your page before reloading." : "Browser storage could not save this change. Keep this tab open and export your page.", true);
     return false;
   }).finally(() => {
     pendingWrites--;
@@ -6676,7 +6765,7 @@ function bindEvents() {
   window.addEventListener("hashchange", () => {
     if (migrateLegacyURL()) route(true);
   });
-  document.addEventListener("click", (event) => {
+  document.addEventListener("click", async (event) => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     const link = event.target.closest("a[href]");
     if (!link || link.hasAttribute("download") || link.target && link.target !== "_self") return;
@@ -6689,6 +6778,7 @@ function bindEvents() {
     if (url.origin !== location.origin || url.hash || !gardenPath(url.pathname)) return;
     event.preventDefault();
     if (editorPath(url.pathname) !== !!body) {
+      if (body && editorAuthorized && await saveEditor() === false) return;
       location.assign(url.pathname + url.search);
       return;
     }
@@ -6702,6 +6792,54 @@ function bindEvents() {
     }
   });
   if (!body) return;
+  const migrate = $3("#upload-browser-garden");
+  if (migrate) {
+    migrate.hidden = !cloudPages.enabled || !browserPagesForImport.length;
+    migrate.addEventListener("click", async () => {
+      migrate.disabled = true;
+      try {
+        const replacements = /* @__PURE__ */ new Map();
+        const pages = browserPagesForImport.map((page) => ({ ...page }));
+        for (const page of pages) {
+          if (page.deleted) continue;
+          const refs = [...(page.markdown || "").matchAll(/\]\(([^)]+)\)/g)].map((match) => match[1]).filter((ref) => /^\.?\/?assets\//.test(ref));
+          for (const ref of refs) {
+            if (replacements.has(ref)) continue;
+            const asset = assets.get(ref);
+            let url = asset?.r2URL || completedUpload(ref);
+            if (!url && asset?.blob?.type.startsWith("image/")) {
+              notice("Uploading existing images to R2 before importing your pages\u2026");
+              url = await uploadR2Image(asset.blob, $3("#sign-out-csrf").value, new AbortController().signal);
+              asset.r2URL = url;
+              asset.r2Pending = false;
+              await writeRecords("assets", [asset]);
+            }
+            if (!url) throw new Error("A page still contains a local or processing video. Finish its YouTube upload or remove it before importing.");
+            replacements.set(ref, url);
+          }
+          page.markdown = (page.markdown || "").replace(/\]\(([^)]+)\)/g, (whole, ref) => replacements.has(ref) ? `](${replacements.get(ref)})` : whole);
+        }
+        await cloudPages.import(pages);
+        location.reload();
+      } catch (error) {
+        notice(error.message, true);
+        migrate.disabled = false;
+      }
+    });
+  }
+  if (cloudPages.enabled) {
+    const drafts = Object.keys(localStorage).filter((key) => key.startsWith("cg-cloud-draft:"));
+    if (drafts.length) notice("Unsaved cloud drafts are available in this browser. Export them before continuing.", true);
+    $3("#export-cloud-drafts").hidden = !drafts.length;
+    $3("#export-cloud-drafts").addEventListener("click", () => {
+      const files = {};
+      for (const key of drafts) {
+        const entry = JSON.parse(localStorage.getItem(key));
+        files[`${slug(entry.id)}.md`] = strToU8(exportedMarkdown(entry));
+      }
+      download(new Blob([zipSync(files)], { type: "application/zip" }), "recovered-drafts.zip");
+    });
+  }
   document.execCommand("defaultParagraphSeparator", false, "p");
   pageReferencePicker = createPageReferencePicker({
     editor: body,
@@ -6989,8 +7127,10 @@ async function boot() {
         await Promise.all(writes);
       }
     });
-    let initial = storedEntries;
-    if (!initial.length) {
+    const cloud = await cloudPages.load();
+    browserPagesForImport = storedEntries;
+    let initial = cloud.cloud ? cloud.pages : storedEntries;
+    if (!initial.length && !cloud.cloud) {
       const response = await fetch("/content/entries.json");
       if (!response.ok) throw new Error("Could not load the sample pages.");
       initial = (await response.json()).map((entry, order) => ({ ...entry, order }));
@@ -6998,10 +7138,13 @@ async function boot() {
     }
     homeEntry = initial.find((entry) => entry.id === HOME_ID && !entry.deleted);
     if (!homeEntry) {
-      const response = await fetch("/content/home.json");
-      if (!response.ok) throw new Error("Could not load Home.");
-      homeEntry = { ...await response.json(), id: HOME_ID };
-      await writeRecords("entries", [homeEntry]);
+      if (cloud.cloud) homeEntry = { id: HOME_ID, title: "Home", markdown: "" };
+      else {
+        const response = await fetch("/content/home.json");
+        if (!response.ok) throw new Error("Could not load Home.");
+        homeEntry = { ...await response.json(), id: HOME_ID };
+        await writeRecords("entries", [homeEntry]);
+      }
     }
     const originalOrder = ["untitled", "note", "link", "image", "unfinished"];
     initial.forEach((entry) => {
@@ -7012,7 +7155,7 @@ async function boot() {
     migrateLegacyURL();
     await route();
   } catch (error) {
-    notice(`The local editor could not start. ${error.message || "Browser storage is unavailable."} Try a regular browser window with storage enabled.`, true);
+    notice(`The garden could not start. ${error.message || "Please reload and try again."} Your saved browser data has been kept.`, true);
     console.error(error);
   }
 }

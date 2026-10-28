@@ -1,4 +1,4 @@
-"""Server-only Supabase PKCE authentication. No page or media storage lives here."""
+"""Server-only Supabase PKCE authentication and owner validation."""
 
 import base64
 from dataclasses import dataclass
@@ -57,10 +57,12 @@ class Config:
     def from_env(cls):
         origin = os.environ.get("APP_ORIGIN", "http://localhost:4183").rstrip("/")
         parsed = urlsplit(origin)
-        if (parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1"}
-                or parsed.port != 4183 or parsed.path or parsed.query or parsed.fragment
-                or parsed.username or parsed.password):
-            raise ValueError("APP_ORIGIN must be http://localhost:4183 or http://127.0.0.1:4183.")
+        local = parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"} and parsed.port == 4183
+        hosted = parsed.scheme == "https" and parsed.hostname and parsed.hostname not in {"localhost", "127.0.0.1"}
+        if (not (local or hosted) or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password):
+            raise ValueError("APP_ORIGIN must be a loopback development origin or HTTPS deployment origin.")
+        if hosted and not os.environ.get('DATABASE_URL'):
+            raise ValueError('Hosted deployments require DATABASE_URL and persistent sessions.')
         url = os.environ.get("SUPABASE_URL", "").rstrip("/")
         key = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "")
         emails = frozenset(email.strip().lower() for email in os.environ.get("OWNER_EMAIL_ALLOWLIST", "").split(",") if email.strip())
@@ -119,6 +121,7 @@ class AuthService:
         self.provider = SupabaseAuth(config)
         self.flows = {}
         self.sessions = {}
+        self.connections = {}
         self.lock = threading.RLock()
 
     def prune(self):
@@ -207,6 +210,7 @@ class AuthService:
             self.sessions[session_id] = {
                 **tokens, "user_id": user["id"], "csrf": secrets.token_urlsafe(32),
                 "deadline": time.time() + SESSION_SECONDS,
+                **({"youtube": self.connections[user["id"]]} if user["id"] in self.connections else {}),
             }
             return session_id, flow["next"]
 

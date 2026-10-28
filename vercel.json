@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "git": {"deploymentEnabled": {"main": false}},
+  "buildCommand": "npm run build",
+  "outputDirectory": "public",
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60,
+      "excludeFiles": "{.git/**,.venv/**,.env*,node_modules/**,tests/**,output/**,.playwright-cli/**}"
+    }
+  },
+  "rewrites": [{"source": "/(.*)", "destination": "/api/index"}]
+}

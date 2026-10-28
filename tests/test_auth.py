@@ -1,6 +1,7 @@
 """Local HTTP integration tests. Google/Supabase are protocol fixtures, not real accounts."""
 
 import base64
+from contextlib import contextmanager
 from dataclasses import replace
 import hashlib
 from http.cookies import SimpleCookie
@@ -17,6 +18,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 from auth import Config
 from server import make_server
+from cloud_store import StoreError
 
 
 def google_user(email="owner@example.test"):
@@ -185,6 +187,44 @@ class AuthHTTPTests(unittest.TestCase):
             self.assertTrue(headers["Location"].startswith("/auth/login?"))
             self.assertNotIn('id="writing-body"', body)
         self.assertEqual(self.request("/auth/session")[0], 401)
+
+    def test_cloud_pages_are_public_but_writes_require_owner_and_csrf(self):
+        class Store:
+            configured = True
+            saved = []
+            @contextmanager
+            def runtime(self, *args):
+                yield
+            def list_pages(self):
+                return [{'id':'note','title':'Public','markdown':'Text','_revision':1}]
+            def save_page(self, value):
+                self.saved.append(value)
+                return {**value, '_revision':2}
+        store = Store()
+        with patch.dict(self.app.RequestHandlerClass.keywords, store=store):
+            status, _, body = self.request('/api/pages')
+            self.assertEqual(status, 200)
+            self.assertTrue(json.loads(body)['cloud'])
+            data = {'document':json.dumps({'id':'note','title':'Saved','markdown':'Body'})}
+            self.assertEqual(self.request('/api/pages','POST',data)[0],401)
+            self.sign_in()
+            self.assertEqual(self.request('/api/pages','POST',{**data,'csrf':'wrong'})[0],403)
+            csrf = self.auth.sessions[self.cookies['cg_session']]['csrf']
+            self.assertEqual(self.request('/api/pages','POST',{**data,'csrf':csrf})[0],200)
+            self.assertEqual(len(store.saved),1)
+
+    def test_failed_state_commit_does_not_send_success_or_session_cookie(self):
+        class Store:
+            configured = True
+            @contextmanager
+            def runtime(self, *args):
+                yield
+                raise StoreError()
+        with patch.dict(self.app.RequestHandlerClass.keywords, store=Store()):
+            status, headers, body = self.request('/auth/login')
+            self.assertEqual(status,503)
+            self.assertNotIn('Set-Cookie',headers)
+            self.assertNotIn('Continue with Google',body)
 
     def test_owner_pkce_login_validated_editor_and_logout(self):
         _, headers, body = self.sign_in()

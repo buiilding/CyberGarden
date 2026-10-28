@@ -5,11 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "esbuild src/app.js --bundle --format=esm --outfile=script.js",
-    "start": "python3 server.py"
+    "start": "python3 scripts/start.py"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "3.1158.0",
-    "@aws-sdk/s3-request-presigner": "3.1158.0",
     "dompurify": "^3.4.17",
     "fflate": "^0.8.3",
     "marked": "^18.1.2",

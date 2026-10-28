@@ -1,3 +1,4 @@
+import { CloudPages } from './cloud-pages.js';
 import { loadImageConfig, r2ImageURL, uploadR2Image } from './r2-images.js';
 import { bindYouTubeUpload, restoreYouTubeUploads, uploadReference, mountUploadPlaceholder, completedUpload, stopYouTubeUpload } from './youtube-upload.js';
 import { marked } from 'marked';
@@ -17,6 +18,8 @@ const entries = new Map();
 const assets = new Map();
 const urls = new Map();
 const imageJobs = new Map();
+const cloudPages = new CloudPages();
+let browserPagesForImport = [];
 const HOME_ID = '__garden_home__';
 let homeEntry;
 let pageReferencePicker;
@@ -56,6 +59,9 @@ function allRecords(store) {
   });
 }
 function writeRecords(store, records) {
+  if (store === 'entries' && cloudPages.enabled) {
+    return Promise.all(records.map(record => cloudPages.save(record)));
+  }
   return new Promise((resolve, reject) => {
     const transaction = db.transaction(store, 'readwrite');
     records.forEach(record => transaction.objectStore(store).put(record));
@@ -67,14 +73,22 @@ function writeRecords(store, records) {
 function persist(entry) {
   const currentRevision = ++revision;
   pendingWrites++;
+  if (cloudPages.enabled) {
+    // Draft copies use their own key and never replace the pre-migration local garden.
+    try { localStorage.setItem(`cg-cloud-draft:${entry.id}`, JSON.stringify(entry)); } catch { /* server save still attempted */ }
+  }
+  const snapshot = JSON.stringify(entry);
   return writeRecords('entries', [{ ...entry }]).then(() => {
+    if (cloudPages.enabled) {
+      try { if (localStorage.getItem(`cg-cloud-draft:${entry.id}`) === snapshot) localStorage.removeItem(`cg-cloud-draft:${entry.id}`); } catch { /* draft remains recoverable */ }
+    }
     if (currentRevision === revision) {
       saveFailed = false;
     }
     return true;
   }).catch(() => {
     saveFailed = true;
-    notice('Browser storage could not save this change. Keep this tab open and export your page.', true);
+    notice(cloudPages.enabled ? 'Cloud save failed. Keep this tab open and export your page before reloading.' : 'Browser storage could not save this change. Keep this tab open and export your page.', true);
     return false;
   }).finally(() => { pendingWrites--; });
 }
@@ -625,7 +639,7 @@ async function importFile(file) {
 function bindEvents() {
   window.addEventListener('popstate', () => { migrateLegacyURL(); route(true); });
   window.addEventListener('hashchange', () => { if (migrateLegacyURL()) route(true); });
-  document.addEventListener('click', event => {
+  document.addEventListener('click', async event => {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     const link = event.target.closest('a[href]');
     if (!link || link.hasAttribute('download') || (link.target && link.target !== '_self')) return;
@@ -637,12 +651,58 @@ function bindEvents() {
     const url = new URL(link.href, location.href);
     if (url.origin !== location.origin || url.hash || !gardenPath(url.pathname)) return;
     event.preventDefault();
-    if (editorPath(url.pathname) !== !!body) { location.assign(url.pathname + url.search); return; }
+    if (editorPath(url.pathname) !== !!body) {
+      if (body && editorAuthorized && await saveEditor() === false) return;
+      location.assign(url.pathname + url.search); return;
+    }
     if (url.pathname !== location.pathname || url.search !== location.search || location.hash) history.pushState(null, '', url.pathname + url.search);
     route(true);
   });
   window.addEventListener('beforeunload', event => { if (pendingWrites || saveFailed) { event.preventDefault(); event.returnValue = ''; } });
   if (!body) return;
+  const migrate = $('#upload-browser-garden');
+  if (migrate) {
+    migrate.hidden = !cloudPages.enabled || !browserPagesForImport.length;
+    migrate.addEventListener('click', async () => {
+      migrate.disabled = true;
+      try {
+        const replacements = new Map();
+        const pages = browserPagesForImport.map(page => ({...page}));
+        for (const page of pages) {
+          if (page.deleted) continue;
+          const refs = [...(page.markdown || '').matchAll(/\]\(([^)]+)\)/g)].map(match=>match[1]).filter(ref=>/^\.?\/?assets\//.test(ref));
+          for (const ref of refs) {
+            if (replacements.has(ref)) continue;
+            const asset = assets.get(ref);
+            let url = asset?.r2URL || completedUpload(ref);
+            if (!url && asset?.blob?.type.startsWith('image/')) {
+              notice('Uploading existing images to R2 before importing your pages…');
+              url = await uploadR2Image(asset.blob, $('#sign-out-csrf').value, new AbortController().signal);
+              asset.r2URL = url; asset.r2Pending = false; await writeRecords('assets', [asset]);
+            }
+            if (!url) throw new Error('A page still contains a local or processing video. Finish its YouTube upload or remove it before importing.');
+            replacements.set(ref,url);
+          }
+          page.markdown = (page.markdown || '').replace(/\]\(([^)]+)\)/g, (whole,ref)=>replacements.has(ref)? `](${replacements.get(ref)})` : whole);
+        }
+        await cloudPages.import(pages);
+        location.reload();
+      } catch(error) { notice(error.message, true); migrate.disabled = false; }
+    });
+  }
+  if (cloudPages.enabled) {
+    const drafts = Object.keys(localStorage).filter(key=>key.startsWith('cg-cloud-draft:'));
+    if (drafts.length) notice('Unsaved cloud drafts are available in this browser. Export them before continuing.', true);
+    $('#export-cloud-drafts').hidden = !drafts.length;
+    $('#export-cloud-drafts').addEventListener('click', () => {
+      const files = {};
+      for (const key of drafts) {
+        const entry = JSON.parse(localStorage.getItem(key));
+        files[`${slug(entry.id)}.md`] = strToU8(exportedMarkdown(entry));
+      }
+      download(new Blob([zipSync(files)],{type:'application/zip'}),'recovered-drafts.zip');
+    });
+  }
   document.execCommand('defaultParagraphSeparator', false, 'p');
   pageReferencePicker = createPageReferencePicker({
     editor: body,
@@ -865,25 +925,30 @@ async function boot() {
         await Promise.all(writes);
       },
     });
-    let initial = storedEntries;
-    if (!initial.length) {
+    const cloud = await cloudPages.load();
+    browserPagesForImport = storedEntries;
+    let initial = cloud.cloud ? cloud.pages : storedEntries;
+    if (!initial.length && !cloud.cloud) {
       const response = await fetch('/content/entries.json');
       if (!response.ok) throw new Error('Could not load the sample pages.');
       initial = (await response.json()).map((entry, order) => ({ ...entry, order })); await writeRecords('entries', initial);
     }
     homeEntry = initial.find(entry => entry.id === HOME_ID && !entry.deleted);
     if (!homeEntry) {
-      const response = await fetch('/content/home.json');
-      if (!response.ok) throw new Error('Could not load Home.');
-      homeEntry = { ...(await response.json()), id: HOME_ID };
-      await writeRecords('entries', [homeEntry]);
+      if (cloud.cloud) homeEntry = {id:HOME_ID,title:'Home',markdown:''};
+      else {
+        const response = await fetch('/content/home.json');
+        if (!response.ok) throw new Error('Could not load Home.');
+        homeEntry = { ...(await response.json()), id: HOME_ID };
+        await writeRecords('entries', [homeEntry]);
+      }
     }
     const originalOrder = ['untitled', 'note', 'link', 'image', 'unfinished'];
     initial.forEach(entry => { entry.order ??= originalOrder.includes(entry.id) ? originalOrder.indexOf(entry.id) : 5; });
     initial.filter(entry => entry.id !== HOME_ID && !entry.deleted).sort((a, b) => a.order - b.order).forEach(entry => entries.set(entry.id, entry));
     bindEvents(); migrateLegacyURL(); await route();
   } catch (error) {
-    notice(`The local editor could not start. ${error.message || 'Browser storage is unavailable.'} Try a regular browser window with storage enabled.`, true);
+    notice(`The garden could not start. ${error.message || 'Please reload and try again.'} Your saved browser data has been kept.`, true);
     console.error(error);
   }
 }

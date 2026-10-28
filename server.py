@@ -14,6 +14,7 @@ from auth import AuthError, AuthService, Config, EDITOR_ROUTE, FLOW_COOKIE, FLOW
 
 from youtube_upload import YouTubeService, YouTubeError
 from r2_images import R2Images, ImageError
+from cloud_store import CloudStore, StoreError
 
 ROOT = Path(__file__).resolve().parent
 PUBLIC_ROUTE = re.compile(r"/|/pages/?|/page/[A-Za-z0-9_-]+/?")
@@ -22,10 +23,11 @@ STATIC = {"/style.css": "text/css", "/script.js": "text/javascript", "/sample.sv
 
 
 class GardenHandler(BaseHTTPRequestHandler):
-    def __init__(self, *args, auth, youtube, images, **kwargs):
+    def __init__(self, *args, auth, youtube, images, store=None, **kwargs):
         self.auth = auth
         self.youtube = youtube
         self.images = images
+        self.store = store or CloudStore()
         super().__init__(*args, **kwargs)
 
     def log_message(self, format, *args):
@@ -37,6 +39,9 @@ class GardenHandler(BaseHTTPRequestHandler):
         self.log_message('"%s %s" %s', self.command, urlsplit(self.path).path, code)
 
     def reply(self, status, content="", content_type="text/html; charset=utf-8", headers=()):
+        if getattr(self, '_defer_reply', False):
+            self._pending_reply = (status, content, content_type, headers)
+            return
         data = content.encode() if isinstance(content, str) else content
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -63,7 +68,9 @@ class GardenHandler(BaseHTTPRequestHandler):
         jar[name]["httponly"] = True
         jar[name]["samesite"] = "Lax"
         jar[name]["max-age"] = seconds
-        # Loopback HTTP only. Never create a Domain cookie.
+        if self.auth.config.origin.startswith("https://"):
+            jar[name]["secure"] = True
+        # Never create a Domain cookie.
         return "Set-Cookie", jar[name].OutputString()
 
     def cookie(self, name):
@@ -88,19 +95,52 @@ class GardenHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
 
+    def dispatch_request(self, operation):
+        if not self.valid_host():
+            self.reply(421, "Use the configured garden address.", "text/plain")
+            return
+        try:
+            # In cloud mode instances share encrypted state; never use process memory as authority.
+            path = unquote(urlsplit(self.path).path)
+            needs_state = path.startswith(('/auth/', '/youtube/', '/media/image-upload')) or (self.command == 'POST' and path in {'/api/pages', '/api/import'}) or EDITOR_ROUTE.fullmatch(path)
+            if self.store.configured and needs_state:
+                # Send cookies/success only after the database commits token changes.
+                self._defer_reply = True
+                self._pending_reply = None
+                try:
+                    with self.auth.lock, self.store.runtime(self.auth, self.youtube):
+                        operation()
+                finally:
+                    self._defer_reply = False
+                if self._pending_reply:
+                    self.reply(*self._pending_reply)
+            else:
+                operation()
+        except StoreError as error:
+            self.reply(error.status, json.dumps({'error': str(error)}), 'application/json')
+
     def do_GET(self):
+        self.dispatch_request(self.get_request)
+
+    def get_request(self):
         if not self.valid_host():
             self.reply(421, "Use the APP_ORIGIN address configured for this local garden.", "text/plain")
             return
         path = unquote(urlsplit(self.path).path)
         query = parse_qs(urlsplit(self.path).query)
-        if path == "/media/config":
+        if path == '/api/pages':
+            if not self.store.configured:
+                self.reply(200, '{"cloud":false,"pages":[]}', 'application/json')
+            else:
+                self.reply(200, json.dumps({'cloud': True, 'pages': self.store.list_pages()}), 'application/json')
+        elif path == "/media/config":
             self.reply(200, json.dumps(self.images.public_config()), "application/json")
         elif path == "/youtube/callback":
             try:
                 session_id = self.cookie(SESSION_COOKIE)
                 session = self.auth.validate(session_id)
                 self.youtube.finish(session_id, session, query.get("state", [""])[0], query.get("code", [""])[0])
+                self.auth.connections[session['user_id']] = session['youtube']
                 self.redirect("/youtube/connected")
             except (AuthError, YouTubeError) as error:
                 self.reply(getattr(error, "status", 400), self.page("YouTube connection", '<p>Connection was not completed. Close this window and try connecting YouTube again in the editor.</p>'))
@@ -158,6 +198,9 @@ class GardenHandler(BaseHTTPRequestHandler):
             self.reply(404, "Not found", "text/plain")
 
     def do_POST(self):
+        self.dispatch_request(self.post_request)
+
+    def post_request(self):
         if not self.valid_host() or self.headers.get("Origin") != self.auth.config.origin:
             self.reply(403, "Request origin is not allowed.", "text/plain")
             return
@@ -166,7 +209,7 @@ class GardenHandler(BaseHTTPRequestHandler):
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if length < 0 or length > 8192 or self.headers.get("Transfer-Encoding"):
+            if length < 0 or length > (3 * 1024 * 1024 if urlsplit(self.path).path in {"/api/pages", "/api/import"} else 8192) or self.headers.get("Transfer-Encoding"):
                 raise ValueError()
             form = parse_qs(self.rfile.read(length).decode())
         except (ValueError, UnicodeError):
@@ -174,7 +217,19 @@ class GardenHandler(BaseHTTPRequestHandler):
             return
         path = urlsplit(self.path).path
         try:
-            if path == "/media/image-upload":
+            if path in {'/api/pages', '/api/import'}:
+                session = self.auth.validate(self.cookie(SESSION_COOKIE))
+                if not hmac.compare_digest(session['csrf'].encode(), form.get('csrf', [''])[0].encode()):
+                    raise AuthError(403)
+                if not self.store.configured:
+                    raise StoreError('Cloud storage is not configured.')
+                try:
+                    value = json.loads(form.get('document', [''])[0])
+                except ValueError:
+                    raise StoreError('Invalid page document.', 400)
+                result = self.store.import_pages(value) if path == '/api/import' else self.store.save_page(value)
+                self.reply(200, json.dumps(result), 'application/json')
+            elif path == "/media/image-upload":
                 session = self.auth.validate(self.cookie(SESSION_COOKIE))
                 if not hmac.compare_digest(session["csrf"].encode(), form.get("csrf", [""])[0].encode()):
                     raise AuthError(403)
@@ -193,10 +248,13 @@ class GardenHandler(BaseHTTPRequestHandler):
                     result = self.youtube.video(session, form.get("id", [""])[0])
                 elif path == "/youtube/disconnect":
                     session.pop("youtube", None)
+                    self.auth.connections.pop(session["user_id"], None)
                     result = {"connected": False}
                 else:
                     self.reply(404, "Not found", "text/plain")
                     return
+                if session.get("youtube"):
+                    self.auth.connections[session["user_id"]] = session["youtube"]
                 self.reply(200, json.dumps(result), "application/json")
             elif path == "/auth/login":
                 self.redirect(self.auth.begin(self.cookie(FLOW_COOKIE), form.get("csrf", [""])[0]))
@@ -205,17 +263,17 @@ class GardenHandler(BaseHTTPRequestHandler):
                 self.redirect("/", [self.cookie_header(SESSION_COOKIE, "", 0)])
             else:
                 self.reply(404, "Not found", "text/plain")
-        except (YouTubeError, ImageError) as error:
+        except (YouTubeError, ImageError, StoreError) as error:
             self.reply(error.status, json.dumps({"error": str(error)}), "application/json")
         except AuthError as error:
-            if path.startswith(("/youtube/", "/media/")):
+            if path.startswith(("/youtube/", "/media/", "/api/")):
                 self.reply(error.status, '{"error":"Sign in to the editor again."}', "application/json")
                 return
             self.error_page(error.status, "This sign-in request expired or was not allowed. Start sign-in again.")
 
 
 def make_server(config, address=("127.0.0.1", 4183)):
-    return ThreadingHTTPServer(address, partial(GardenHandler, auth=AuthService(config), youtube=YouTubeService(config.origin), images=R2Images()))
+    return ThreadingHTTPServer(address, partial(GardenHandler, auth=AuthService(config), youtube=YouTubeService(config.origin), images=R2Images(), store=CloudStore()))
 
 
 if __name__ == "__main__":

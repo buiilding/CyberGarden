@@ -1,10 +1,7 @@
 """Owner-authorized direct image uploads. R2 credentials never leave the server."""
-import json
 import os
-from pathlib import Path
 import re
 import secrets
-import subprocess
 from urllib.parse import urlsplit
 
 MAX_IMAGE_BYTES = 40 * 1024 * 1024
@@ -50,16 +47,15 @@ class R2Images:
         if content_type not in IMAGE_TYPES or not 0 < size <= MAX_IMAGE_BYTES:
             raise ImageError('Choose a PNG, JPEG, GIF, WebP, or AVIF image up to 40 MB.')
         key = f'images/{secrets.token_hex(16)}.{IMAGE_TYPES[content_type]}'
-        root = Path(__file__).resolve().parent
-        payload = {'accountId': self.account, 'bucket': self.bucket, 'accessKeyId': self.access, 'secretAccessKey': self.secret,
-                   'key': key, 'type': content_type, 'size': size}
         try:
-            result = subprocess.run(['node', str(root / 'scripts/sign-r2-upload.mjs')], input=json.dumps(payload),
-                                    capture_output=True, text=True, timeout=15, cwd=root, check=True)
-            upload_url = json.loads(result.stdout)['uploadURL']
-            parsed = urlsplit(upload_url)
-            if parsed.scheme != 'https' or parsed.netloc != f'{self.account}.r2.cloudflarestorage.com' or not parsed.path.startswith(f'/{self.bucket}/images/'):
-                raise ValueError()
-        except (OSError, subprocess.SubprocessError, ValueError, KeyError):
-            raise ImageError('Could not prepare image upload. Check R2 configuration and run npm ci.', 503) from None
+            import boto3
+            from botocore.config import Config
+            client = boto3.client('s3', endpoint_url=f'https://{self.account}.r2.cloudflarestorage.com', region_name='auto',
+                aws_access_key_id=self.access, aws_secret_access_key=self.secret,
+                config=Config(signature_version='s3v4', request_checksum_calculation='when_required', s3={'addressing_style':'path'}))
+            upload_url = client.generate_presigned_url('put_object', Params={
+                'Bucket': self.bucket, 'Key': key, 'ContentType': content_type, 'ContentLength': size,
+            }, ExpiresIn=300, HttpMethod='PUT')
+        except Exception:
+            raise ImageError('Could not prepare image upload. Check R2 configuration and install requirements.txt.', 503) from None
         return {'uploadURL': upload_url, 'publicURL': f'{self.public_base}/{key}', 'contentType': content_type}

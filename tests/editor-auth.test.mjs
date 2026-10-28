@@ -32,7 +32,7 @@ function setup({ editing = false, allowed = true } = {}) {
   location.assign = path => navigations.push(['assign', path]);
   window.scrollTo = () => {};
   const context = vm.createContext({
-    window, document, $, location, HOME_ID, homeEntry, entries: new Map([['note', note]]),
+    window, document, $, location, URL, HOME_ID, homeEntry, entries: new Map([['note', note]]),
     body: $('#writing-body'), titleInput: $('#entry-title'), activeId: null, deletingId: null,
     editorAuthorized: false, routeRevision: 0, pageReferencePicker: undefined,
     savedRange: null, pendingWrites: 0, saveFailed: false,
@@ -137,4 +137,26 @@ test('ordinary page editing and Save return to the public document boundary', as
   app.context.location.pathname = '/page/note';
   await app.context.route();
   assert.deepEqual(app.navigations, [['replace', '/page/note']]);
+});
+
+test('Save waits for the pending cloud write and stays in the editor after a failed save', async () => {
+  const app = setup({ editing: true });
+  await app.context.route();
+  let click;
+  app.document.addEventListener = (_, listener) => { click = listener; };
+  const start = source.indexOf("  document.addEventListener('click', async event =>", source.indexOf('function bindEvents()'));
+  const end = source.indexOf("  window.addEventListener('beforeunload'", start);
+  vm.runInContext(source.slice(start, end), app.context);
+  let finish;
+  app.context.persist = () => new Promise(resolve => { finish = resolve; });
+  const event = {button:0, target:app.$('#preview-entry'), preventDefault() {}};
+  const navigation = click(event);
+  assert.equal(typeof finish, 'function');
+  assert.deepEqual(app.navigations, []);
+  finish(true);
+  await navigation;
+  assert.deepEqual(app.navigations, [['assign', '/']]);
+  app.context.persist = async () => false;
+  await click(event);
+  assert.equal(app.navigations.length, 1);
 });
