@@ -1,4 +1,4 @@
-import { bindYouTubeUpload } from './youtube-upload.js';
+import { bindYouTubeUpload, restoreYouTubeUploads, uploadReference, mountUploadPlaceholder, completedUpload, stopYouTubeUpload } from './youtube-upload.js';
 import { marked } from 'marked';
 import TurndownService from 'turndown';
 import DOMPurify from 'dompurify';
@@ -98,6 +98,7 @@ function assetURL(path) {
   return urls.get(path);
 }
 function mediaBlock(kind, ref, label, editing) {
+  if (uploadReference(ref) && completedUpload(ref)) return mediaBlock('youtube', completedUpload(ref), label, editing);
   const card = document.createElement('figure');
   card.className = 'media-block';
   card.dataset.mediaKind = kind;
@@ -114,6 +115,7 @@ function mediaBlock(kind, ref, label, editing) {
     remove.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg>';
     card.append(remove);
   }
+  if (uploadReference(ref)) { mountUploadPlaceholder(card, ref, editing); return card; }
   const videoId = kind === 'youtube' ? youtubeID(ref) : null;
   if (videoId) {
     const player = document.createElement('iframe');
@@ -191,6 +193,7 @@ function saveEditor() {
 }
 function removeMedia(media) {
   const target = caretTargetBesideMedia(media);
+  if (uploadReference(media.dataset.ref)) stopYouTubeUpload(media.dataset.ref);
   unmountYouTubePlayers(media);
   media.remove();
   savedRange = focusTextCaret(body, target).cloneRange();
@@ -464,7 +467,7 @@ async function exportEntry(bundle) {
     const refs = [...fragment.querySelectorAll('[data-ref]')].map(node => node.dataset.ref);
     const missing = [];
     for (const ref of new Set(refs)) {
-      if (assets.has(ref)) files[ref] = new Uint8Array(await assets.get(ref).blob.arrayBuffer());
+      if (assets.get(ref)?.blob) files[ref] = new Uint8Array(await assets.get(ref).blob.arrayBuffer());
       else if (ref === './sample.svg' || ref === 'sample.svg') files['sample.svg'] = new Uint8Array(await (await fetch('/sample.svg')).arrayBuffer());
       else if (!youtubeID(ref)) missing.push(ref);
     }
@@ -662,11 +665,11 @@ function bindEvents() {
   body.addEventListener('contextmenu', showWritingMenu);
   const openYouTubeUpload = bindYouTubeUpload({
     capture() { rememberSelection(); return { owner: activeId, range: savedRange?.cloneRange() }; },
-    insert(target, url) {
+    insert(target, ref, label) {
       if (!editorAuthorized || activeId !== target.owner || $('#editor-shell').hidden || !target.range || !body.contains(target.range.commonAncestorContainer)) return false;
       const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(target.range);
       savedRange = target.range.cloneRange();
-      insertNode(mediaBlock('youtube', url, '', true));
+      insertNode(mediaBlock('video', ref, label, true));
       return true;
     },
   });
@@ -709,7 +712,7 @@ function bindEvents() {
       return;
     }
     const media = event.target.closest('[data-media-kind]');
-    if (media && !event.target.closest('video, iframe, a, button')) media.focus({ preventScroll: true });
+    if (media && !event.target.closest('video, iframe, a, button, input, textarea, select, summary, label')) media.focus({ preventScroll: true });
     if (event.target === body) {
       ensureTrailingTextLine(body);
       const last = body.lastElementChild;
@@ -776,6 +779,31 @@ async function boot() {
     db = await openDB();
     const [storedEntries, storedAssets] = await Promise.all([allRecords('entries'), allRecords('assets')]);
     storedAssets.forEach(asset => assets.set(asset.path, asset));
+    restoreYouTubeUploads(storedAssets, {
+      async save(record) {
+        pendingWrites++;
+        try { assets.set(record.path, record); await writeRecords('assets', [record]); }
+        finally { pendingWrites--; }
+      },
+      async complete(ref, url) {
+        // Swap only the matching block. Do this before yielding so typing cannot
+        // serialize the old placeholder back over the completed video reference.
+        for (const card of document.querySelectorAll('[data-upload-ref]')) {
+          if (card.dataset.uploadRef !== ref) continue;
+          const replacement = mediaBlock('youtube', url, '', card.contentEditable === 'false');
+          card.replaceWith(replacement);
+          mountYouTubePlayers(replacement).catch(error => notice(error.message, true));
+        }
+        const writes = [];
+        if (editorAuthorized && activeId) writes.push(saveEditor());
+        for (const entry of [homeEntry, ...entries.values()]) {
+          if (!entry || entry.deleted) continue;
+          const markdown = entry.markdown.split('\n').map(line => line.startsWith('[Video:') && line.endsWith(`](${ref})`) ? url : line).join('\n');
+          if (markdown !== entry.markdown) { entry.markdown = markdown; writes.push(persist(entry)); }
+        }
+        await Promise.all(writes);
+      },
+    });
     let initial = storedEntries;
     if (!initial.length) {
       const response = await fetch('/content/entries.json');

@@ -85,7 +85,7 @@ export async function uploadVideo(job, metadata, signal, onProgress) {
     }
     if (response.status === 404) { job.uri = null; throw new Error('The upload session expired. Retry to start the upload again.'); }
     if (response.status === 401 || response.status === 0 || response.status === 429 || response.status >= 500) {
-      if (++retries > 5) throw new Error('Upload interrupted. Keep this dialog open and retry to resume.');
+      if (++retries > 5) throw new Error('Upload interrupted. Retry to resume the upload.');
       if (response.status === 401) token = (await api('token', { refresh: 'true' }, signal)).access_token;
       const retrySeconds = Number(response.retry) || 0;
       await delay(Math.min(60000, Math.max(retrySeconds * 1000, 1000 * 2 ** retries)), signal);
@@ -112,81 +112,161 @@ export async function waitForVideo(id, signal, report) {
   throw new Error('YouTube is still processing. Retry to check again; the file will not be uploaded twice.');
 }
 
+const jobs = new Map();
+let saveJob, finishJob;
+function defaultMetadata(name) {
+  return { title: [...name.replace(/\.[^.]+$/, '').replace(/[<>]/g, ' ')].slice(0, 100).join('').trim() || 'Untitled video', description: '', visibility: 'unlisted', madeForKids: false };
+}
+export const uploadReference = ref => /^assets\/youtube-upload-[a-zA-Z0-9-]+$/.test(ref);
+export const hasActiveUploads = () => [...jobs.values()].some(job => job.busy && !job.videoId);
+export function restoreYouTubeUploads(records, callbacks) {
+  saveJob = callbacks.save; finishJob = callbacks.complete;
+  for (const record of records) if (record.youtubeUpload) jobs.set(record.path, { ...record.youtubeUpload, ref: record.path });
+}
+async function persistJob(job) {
+  // Persist recovery metadata, never the file, bearer token, or resumable URL.
+  await saveJob({ path: job.ref, name: job.name, youtubeUpload: {
+    name: job.name, size: job.size, metadata: job.metadata, videoId: job.videoId || null,
+    state: job.state, message: job.message || '',
+  } });
+}
+function refresh(job, extraCard) {
+  const cards = [...document.querySelectorAll('[data-upload-ref]')];
+  if (extraCard && !cards.includes(extraCard)) cards.push(extraCard);
+  for (const card of cards) {
+    if (card.dataset.uploadRef !== job.ref) continue;
+    card.querySelector('[data-upload-status]').textContent = job.message || 'Ready to upload';
+    const progress = card.querySelector('progress');
+    progress.hidden = job.state !== 'uploading'; progress.value = job.progress || 0;
+    const error = card.querySelector('[data-upload-error]');
+    error.textContent = job.error || '';
+    const action = card.querySelector('[data-upload-action]');
+    if (!action) continue;
+    action.textContent = job.connected === false ? 'Connect YouTube' : job.file || job.videoId ? 'Retry' : 'Choose video again';
+    action.disabled = !!job.busy || !!job.connecting;
+    action.hidden = !!job.busy || !!job.connecting || (!job.error && job.connected !== false);
+
+  }
+}
+async function connection(job) {
+  const response = await fetch('/youtube/status', { cache: 'no-store' });
+  if (!response.ok) throw new Error('Sign in to the editor again.');
+  const result = await response.json();
+  job.connected = result.connected;
+  if (!result.configured) throw new Error('YouTube needs setup. See README.md.');
+  return result;
+}
+async function connectChannel(job) {
+  const popup = window.open('about:blank', 'cybergarden-youtube', 'popup,width=600,height=740');
+  if (!popup) throw new Error('Allow popups to connect your YouTube channel.');
+  job.popup = popup; job.connecting = true; job.error = ''; refresh(job);
+  try {
+    const result = await api('connect'); popup.location.href = result.url;
+    const deadline = Date.now() + 10 * 60 * 1000;
+    let finished = false;
+    while (!popup.closed && Date.now() < deadline && !job.stopped) {
+      await delay(1000);
+      try { finished = popup.location.pathname === '/youtube/connected'; } catch { /* Google is cross-origin */ }
+      if (finished) break;
+    }
+    popup.close();
+    if (!finished || !(await connection(job)).connected) throw new Error('YouTube connection was not completed. Try again.');
+    job.message = 'Connected. Ready to upload.';
+  } finally { popup.close(); job.connecting = false; refresh(job); }
+}
+async function run(job) {
+  if (job.busy || job.stopped) return;
+  job.busy = true; job.error = ''; job.controller = new AbortController();
+  job.state = job.videoId ? 'processing' : 'uploading';
+  job.message = job.videoId ? 'Processing on YouTube…' : 'Uploading…'; refresh(job);
+  try {
+    if (!(await connection(job)).connected) throw new Error('Connect YouTube, then retry.');
+    if (!job.videoId) {
+      if (!job.uri) job.metadata = defaultMetadata(job.name);
+      if (!job.file) throw new Error('Choose the same video file to resume this upload.');
+      await uploadVideo(job, job.metadata, job.controller.signal, (sent, total) => {
+        job.progress = sent / total; job.message = `Uploading… ${Math.floor(job.progress * 100)}%`; refresh(job);
+      });
+      job.state = 'processing'; job.message = 'Processing on YouTube…';
+      await persistJob(job); refresh(job);
+    }
+    await waitForVideo(job.videoId, job.controller.signal, () => { job.message = 'Processing on YouTube…'; refresh(job); });
+    if (job.stopped) return;
+    job.state = 'ready'; job.message = 'Ready'; await persistJob(job);
+    await finishJob(job.ref, `https://www.youtube.com/watch?v=${job.videoId}`);
+    if (job.preview) URL.revokeObjectURL(job.preview);
+    job.file = null;
+  } catch (failure) {
+    if (failure.name !== 'AbortError') {
+      job.state = 'error'; job.error = failure.message; job.message = job.videoId ? 'Processing needs attention' : 'Upload needs attention';
+      await persistJob(job).catch(() => { job.error += ' Keep this tab open; recovery could not be saved.'; });
+    }
+  } finally { job.busy = false; refresh(job); }
+}
+export function stopYouTubeUpload(ref) {
+  const job = jobs.get(ref);
+  if (!job) return;
+  job.stopped = true; job.controller?.abort(); job.popup?.close();
+  if (job.preview) URL.revokeObjectURL(job.preview);
+}
+export function completedUpload(ref) {
+  const job = jobs.get(ref);
+  return job?.state === 'ready' && job.videoId ? `https://www.youtube.com/watch?v=${job.videoId}` : null;
+}
+export function mountUploadPlaceholder(card, ref, editing) {
+  const job = jobs.get(ref) || { ref, name: card.dataset.label || 'Video', state: 'error', message: 'Upload interrupted', metadata: { title: card.dataset.label || 'Video', description: '', visibility: 'unlisted', madeForKids: false } };
+  jobs.set(ref, job); card.dataset.uploadRef = ref; card.classList.add('youtube-upload');
+  const preview = document.createElement('div'); preview.className = 'upload-preview';
+  if (job.file) {
+    job.preview ||= URL.createObjectURL(job.file);
+    const video = document.createElement('video'); video.src = job.preview; video.controls = true; video.muted = true; video.preload = 'metadata'; preview.append(video);
+  } else { preview.textContent = 'Video'; }
+  const panel = document.createElement('div'); panel.className = 'upload-overlay';
+  panel.innerHTML = `<span data-upload-status role="status" aria-live="polite"></span><progress max="1" value="0" aria-label="Video upload progress" hidden></progress><span data-upload-error role="alert"></span>`;
+  if (editing) {
+    const controls = document.createElement('div');
+    controls.innerHTML = `<button type="button" data-upload-action hidden>Retry</button><input data-upload-reselect type="file" accept="video/*" hidden>`;
+    panel.append(controls);
+    for (const type of ['paste', 'keydown', 'contextmenu', 'input']) controls.addEventListener(type, event => event.stopPropagation());
+    controls.querySelector('[data-upload-action]').addEventListener('click', async () => {
+      if (job.connected === false) {
+        try { await connectChannel(job); if (!job.stopped) run(job); }
+        catch (failure) { job.error = failure.message; refresh(job); }
+      } else if (!job.file && !job.videoId) controls.querySelector('[data-upload-reselect]').click();
+      else run(job);
+    });
+    controls.querySelector('[data-upload-reselect]').addEventListener('change', event => {
+      const file = event.target.files[0]; event.target.value = '';
+      if (!file) return;
+      if (file.name !== job.name || (job.size && file.size !== job.size)) { job.error = 'Choose the original video file.'; refresh(job); return; }
+      job.file = file; run(job);
+    });
+    connection(job).then(result => {
+      if (job.stopped || job.busy || job.state === 'ready') return;
+      if (!result.connected) { job.message = 'Connect YouTube to upload'; refresh(job); return; }
+      if (job.state !== 'error' && (job.file || job.videoId)) run(job);
+      else {
+        job.message = job.videoId ? 'Processing needs attention' : 'Upload interrupted';
+        job.error ||= job.videoId ? 'Retry to check processing.' : 'Choose the original file to continue.';
+        refresh(job);
+      }
+    }).catch(failure => { job.error = failure.message; refresh(job); });
+  }
+  card.append(preview, panel); refresh(job, card);
+}
 export function bindYouTubeUpload({ capture, insert }) {
-  const dialog = $('#youtube-upload-dialog'), form = $('#youtube-upload-form'), input = $('#youtube-upload-file');
-  const status = $('#youtube-upload-status'), error = $('#youtube-upload-error'), submit = $('#youtube-upload-submit');
-  const connect = $('#youtube-connect'), progress = $('#youtube-upload-progress');
-  let target, job, controller, busy = false, popup;
-  const report = message => { status.textContent = message; };
-  const updateConnection = async () => {
-    const response = await fetch('/youtube/status', { cache: 'no-store' });
-    if (!response.ok) throw new Error('Sign in to the editor again.');
-    const connection = await response.json();
-    connect.disabled = !connection.configured || busy;
-    submit.disabled = !connection.connected || busy;
-    connect.textContent = connection.connected ? 'Change YouTube channel' : 'Connect YouTube';
-    report(connection.connected ? `Upload to ${connection.channel}` : connection.configured ? 'Connect your YouTube channel to upload.' : 'YouTube needs setup: add YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET to .env.local, then restart. See README.md.');
-    return connection.connected;
-  };
+  const input = $('#youtube-upload-file');
+  let target;
   input.addEventListener('change', async () => {
     const file = input.files[0]; input.value = '';
     if (!file) return;
-    form.reset(); error.textContent = ''; progress.hidden = true; submit.disabled = true;
-    job = { file }; $('#youtube-upload-title').value = file.name.replace(/\.[^.]+$/, '').slice(0, 100) || 'Untitled video';
-    $('#youtube-upload-filename').textContent = file.name;
-    dialog.showModal();
-    try { await updateConnection(); } catch (failure) { error.textContent = failure.message; }
+    if (!file.size || file.size > 256e9 || (file.type && !file.type.startsWith('video/') && file.type !== 'application/octet-stream')) { alert('Choose a video file up to 256 GB.'); return; }
+    const ref = `assets/youtube-upload-${crypto.randomUUID()}`;
+    const job = { ref, file, name: file.name, size: file.size, state: 'ready-to-upload', message: 'Preparing upload…', metadata: defaultMetadata(file.name) };
+    jobs.set(ref, job);
+    if (!insert(target, ref, file.name)) { jobs.delete(ref); return; }
+    try { await persistJob(job); } catch { job.error = 'This placeholder could not be saved. Keep this tab open.'; refresh(job); }
   });
-  connect.addEventListener('click', async () => {
-    error.textContent = ''; popup = window.open('about:blank', 'cybergarden-youtube', 'popup,width=600,height=740');
-    if (!popup) { error.textContent = 'Allow popups to connect your YouTube channel.'; return; }
-    connect.disabled = true; submit.disabled = true;
-    try {
-      const connection = await api('connect'); popup.location.href = connection.url;
-      report('Choose your YouTube channel in the Google window, then return here.');
-      const deadline = Date.now() + 10 * 60 * 1000;
-      // Wait for the callback to land on our origin before observing success.
-      while (!popup.closed && Date.now() < deadline) {
-        await delay(1000);
-        let finished = false;
-        try { finished = popup.location.pathname === '/youtube/connected'; } catch { /* Google window is cross-origin */ }
-        if (finished) { popup.close(); break; }
-      }
-      if (!await updateConnection()) throw new Error('YouTube connection was not completed. Try again.');
-    } catch (failure) { popup?.close(); error.textContent = failure.message; connect.disabled = false; }
-  });
-  const stop = () => { controller?.abort(); popup?.close(); dialog.close(); };
-  $('#youtube-upload-cancel').addEventListener('click', stop);
-  dialog.addEventListener('cancel', event => { event.preventDefault(); stop(); });
-  form.addEventListener('submit', async event => {
-    event.preventDefault(); if (busy || !job) return;
-    const title = $('#youtube-upload-title').value.trim(), description = $('#youtube-upload-description').value;
-    if (!title || [...title].length > 100 || /[<>]/.test(title)) { error.textContent = 'Use a title of 1–100 characters without < or >.'; return; }
-    if (new TextEncoder().encode(description).length > 5000 || /[<>]/.test(description)) { error.textContent = 'Description must be at most 5,000 bytes, without < or >.'; return; }
-    if ((!job.file.type.startsWith('video/') && job.file.type && job.file.type !== 'application/octet-stream') || !job.file.size || job.file.size > 256e9) { error.textContent = 'Choose a video file up to 256 GB.'; return; }
-    controller = new AbortController(); busy = true; error.textContent = ''; submit.disabled = connect.disabled = true;
-    form.querySelector('fieldset').disabled = true;
-    try {
-      if (!job.videoId) await uploadVideo(job, { title, description, visibility: $('#youtube-upload-visibility').value, madeForKids: $('#youtube-upload-kids').value === 'yes' }, controller.signal, (sent, total) => {
-        progress.hidden = false; progress.value = sent / total;
-        report(`Uploading to YouTube… ${Math.floor(sent / total * 100)}%`);
-      });
-      progress.hidden = true;
-      await waitForVideo(job.videoId, controller.signal, report);
-      const url = `https://www.youtube.com/watch?v=${job.videoId}`;
-      if (!insert(target, url)) throw new Error(`Uploaded, but the original editing position changed. Add this URL in the intended page: ${url}`);
-      dialog.close(); job = null;
-    } catch (failure) {
-      if (failure.name !== 'AbortError') error.textContent = failure.message + (job?.videoId ? ` Video link: https://www.youtube.com/watch?v=${job.videoId}` : '');
-    } finally {
-      busy = false; submit.disabled = false; connect.disabled = !!job?.uri || !!job?.videoId;
-      form.querySelector('fieldset').disabled = !!job?.uri || !!job?.videoId;
-      submit.textContent = job?.videoId ? 'Check processing and insert' : job?.uri ? 'Resume upload' : 'Upload and insert';
-    }
-  });
-  return () => {
-    if (busy) { dialog.showModal(); return; }
-    target = capture(); job = null; form.querySelector('fieldset').disabled = false;
-    submit.textContent = 'Upload and insert'; input.click();
-  };
+  window.addEventListener('beforeunload', event => { if (hasActiveUploads()) { event.preventDefault(); event.returnValue = ''; } });
+  return () => { target = capture(); input.click(); };
 }
