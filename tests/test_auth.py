@@ -267,6 +267,16 @@ class AuthHTTPTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertNotIn(self.auth.config.publishable_key, body)
 
+    def test_r2_images_require_owner_and_csrf_and_keep_credentials_private(self):
+        status, _, body = self.request("/media/config")
+        self.assertEqual(status, 200)
+        self.assertEqual(set(json.loads(body)), {"configured", "imageBaseURL", "maxImageBytes"})
+        self.assertEqual(self.request("/media/image-upload", "POST", {"type":"image/png", "size":"128", "csrf":"forged"})[0], 401)
+        self.sign_in()
+        self.assertEqual(self.request("/media/image-upload", "POST", {"type":"image/png", "size":"128", "csrf":"wrong"})[0], 403)
+        csrf = self.auth.sessions[self.cookies["cg_session"]]["csrf"]
+        self.assertEqual(self.request("/media/image-upload", "POST", {"type":"image/png", "size":"128", "csrf":csrf}, origin="http://evil.example")[0], 403)
+
     def test_youtube_routes_require_owner_session_and_csrf(self):
         self.assertEqual(self.request("/youtube/status")[0], 401)
         self.assertEqual(self.request("/youtube/token", "POST", {"csrf": "forged"})[0], 401)

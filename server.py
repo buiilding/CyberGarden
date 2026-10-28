@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 from auth import AuthError, AuthService, Config, EDITOR_ROUTE, FLOW_COOKIE, FLOW_SECONDS, SESSION_COOKIE, SESSION_SECONDS, load_local_env
 
 from youtube_upload import YouTubeService, YouTubeError
+from r2_images import R2Images, ImageError
 
 ROOT = Path(__file__).resolve().parent
 PUBLIC_ROUTE = re.compile(r"/|/pages/?|/page/[A-Za-z0-9_-]+/?")
@@ -21,9 +22,10 @@ STATIC = {"/style.css": "text/css", "/script.js": "text/javascript", "/sample.sv
 
 
 class GardenHandler(BaseHTTPRequestHandler):
-    def __init__(self, *args, auth, youtube, **kwargs):
+    def __init__(self, *args, auth, youtube, images, **kwargs):
         self.auth = auth
         self.youtube = youtube
+        self.images = images
         super().__init__(*args, **kwargs)
 
     def log_message(self, format, *args):
@@ -92,7 +94,9 @@ class GardenHandler(BaseHTTPRequestHandler):
             return
         path = unquote(urlsplit(self.path).path)
         query = parse_qs(urlsplit(self.path).query)
-        if path == "/youtube/callback":
+        if path == "/media/config":
+            self.reply(200, json.dumps(self.images.public_config()), "application/json")
+        elif path == "/youtube/callback":
             try:
                 session_id = self.cookie(SESSION_COOKIE)
                 session = self.auth.validate(session_id)
@@ -170,7 +174,13 @@ class GardenHandler(BaseHTTPRequestHandler):
             return
         path = urlsplit(self.path).path
         try:
-            if path.startswith("/youtube/"):
+            if path == "/media/image-upload":
+                session = self.auth.validate(self.cookie(SESSION_COOKIE))
+                if not hmac.compare_digest(session["csrf"].encode(), form.get("csrf", [""])[0].encode()):
+                    raise AuthError(403)
+                result = self.images.presign(form.get("type", [""])[0], form.get("size", [""])[0])
+                self.reply(200, json.dumps(result), "application/json")
+            elif path.startswith("/youtube/"):
                 session_id = self.cookie(SESSION_COOKIE)
                 session = self.auth.validate(session_id)
                 if not hmac.compare_digest(session["csrf"].encode(), form.get("csrf", [""])[0].encode()):
@@ -195,17 +205,17 @@ class GardenHandler(BaseHTTPRequestHandler):
                 self.redirect("/", [self.cookie_header(SESSION_COOKIE, "", 0)])
             else:
                 self.reply(404, "Not found", "text/plain")
-        except YouTubeError as error:
+        except (YouTubeError, ImageError) as error:
             self.reply(error.status, json.dumps({"error": str(error)}), "application/json")
         except AuthError as error:
-            if path.startswith("/youtube/"):
+            if path.startswith(("/youtube/", "/media/")):
                 self.reply(error.status, '{"error":"Sign in to the editor again."}', "application/json")
                 return
             self.error_page(error.status, "This sign-in request expired or was not allowed. Start sign-in again.")
 
 
 def make_server(config, address=("127.0.0.1", 4183)):
-    return ThreadingHTTPServer(address, partial(GardenHandler, auth=AuthService(config), youtube=YouTubeService(config.origin)))
+    return ThreadingHTTPServer(address, partial(GardenHandler, auth=AuthService(config), youtube=YouTubeService(config.origin), images=R2Images()))
 
 
 if __name__ == "__main__":

@@ -1,3 +1,40 @@
+// src/r2-images.js
+var config = { configured: false, imageBaseURL: "", maxImageBytes: 40 * 1024 * 1024 };
+async function loadImageConfig(request = fetch) {
+  const response = await request("/media/config", { cache: "no-store" });
+  if (!response.ok) throw new Error("Could not load image storage configuration.");
+  const result = await response.json();
+  const base = result.imageBaseURL ? new URL(result.imageBaseURL) : null;
+  if (base && (base.protocol !== "https:" || base.username || base.password || base.pathname !== "/" || base.search || base.hash)) throw new Error("Invalid image storage origin.");
+  config = { configured: result.configured === true, imageBaseURL: base?.origin || "", maxImageBytes: result.maxImageBytes || 40 * 1024 * 1024 };
+}
+function r2ImageURL(value) {
+  if (!config.imageBaseURL) return null;
+  try {
+    const url = new URL(value);
+    return url.origin === config.imageBaseURL && !url.username && !url.password && !url.search && !url.hash && /^\/images\/[a-f0-9]{32}\.(png|jpg|gif|webp|avif)$/.test(url.pathname) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+async function uploadR2Image(file, csrf, signal, request = fetch) {
+  if (!config.configured) throw new Error("Cloudflare R2 image storage needs setup. See README.md.");
+  const signed = await request("/media/image-upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    signal,
+    body: new URLSearchParams({ csrf, type: file.type, size: String(file.size) })
+  });
+  const result = await signed.json().catch(() => ({}));
+  if (!signed.ok) throw new Error(result.error || "Could not prepare image upload.");
+  const publicURL = r2ImageURL(result.publicURL);
+  const target = new URL(result.uploadURL);
+  if (!publicURL || target.protocol !== "https:" || !/^[a-f0-9]{32}\.r2\.cloudflarestorage\.com$/.test(target.hostname) || target.username || target.password) throw new Error("Invalid image upload destination.");
+  const response = await request(result.uploadURL, { method: "PUT", headers: { "Content-Type": file.type }, body: file, signal, redirect: "error" });
+  if (!response.ok) throw new Error(`Image upload failed (${response.status}). Retry to send it again.`);
+  return publicURL;
+}
+
 // src/youtube-upload.js
 var $ = (selector) => document.querySelector(selector);
 var delay = (ms, signal) => new Promise((resolve, reject) => {
@@ -5864,6 +5901,7 @@ var titleInput = $3("#entry-title");
 var entries2 = /* @__PURE__ */ new Map();
 var assets = /* @__PURE__ */ new Map();
 var urls = /* @__PURE__ */ new Map();
+var imageJobs = /* @__PURE__ */ new Map();
 var HOME_ID = "__garden_home__";
 var homeEntry;
 var pageReferencePicker;
@@ -5961,6 +5999,7 @@ function assetURL(path) {
   return urls.get(path);
 }
 function mediaBlock(kind, ref, label, editing) {
+  if (kind === "image" && assets.get(ref)?.r2URL && r2ImageURL(assets.get(ref).r2URL)) ref = assets.get(ref).r2URL;
   if (uploadReference(ref) && completedUpload(ref)) return mediaBlock("youtube", completedUpload(ref), label, editing);
   const card = document.createElement("figure");
   card.className = "media-block";
@@ -5997,7 +6036,7 @@ function mediaBlock(kind, ref, label, editing) {
     card.append(player);
     return card;
   }
-  const media = kind === "youtube" ? null : assetURL(ref);
+  const media = kind === "youtube" ? null : kind === "image" && r2ImageURL(ref) || assetURL(ref);
   if (kind === "image" && media) {
     const img = document.createElement("img");
     img.src = media;
@@ -6021,6 +6060,7 @@ function mediaBlock(kind, ref, label, editing) {
     detail.textContent = kind === "youtube" ? "Unsupported YouTube URL." : `${ref} \xB7 Media file not available locally. Import its garden ZIP to restore it.`;
     card.append(name, detail);
   }
+  if (kind === "image") attachImageUpload(card, ref, editing);
   return card;
 }
 var renderer = new m.Renderer();
@@ -6078,6 +6118,11 @@ function saveEditor() {
 function removeMedia(media) {
   const target = caretTargetBesideMedia(media);
   if (uploadReference(media.dataset.ref)) stopYouTubeUpload(media.dataset.ref);
+  const imageJob = imageJobs.get(media.dataset.ref);
+  if (imageJob) {
+    imageJob.cancelled = true;
+    imageJob.controller?.abort();
+  }
   unmountYouTubePlayers(media);
   media.remove();
   savedRange = focusTextCaret(body, target).cloneRange();
@@ -6392,7 +6437,7 @@ async function addFiles(files, kind) {
       continue;
     }
     const path = `assets/${crypto.randomUUID()}-${slug(file.name)}`;
-    const asset = { path, name: file.name, blob: file };
+    const asset = { path, name: file.name, blob: file, ...kind === "image" ? { r2Pending: true } : {} };
     try {
       await writeRecords("assets", [asset]);
       assets.set(path, asset);
@@ -6404,6 +6449,87 @@ async function addFiles(files, kind) {
     } catch {
       notice("There is not enough browser storage for this file. Try a smaller one.", true);
     }
+  }
+}
+function attachImageUpload(card, ref, editing) {
+  const asset = assets.get(ref);
+  if (!asset?.r2Pending || !asset.blob) return;
+  let job = imageJobs.get(ref);
+  if (!job) {
+    job = { asset, busy: false, error: "" };
+    imageJobs.set(ref, job);
+  }
+  const badge = document.createElement("div");
+  badge.className = "upload-overlay";
+  const status = document.createElement("span");
+  status.dataset.imageUploadStatus = "";
+  badge.append(status);
+  if (editing) {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.dataset.imageUploadRetry = "";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", () => {
+      job.cancelled = false;
+      runImageUpload(ref);
+    });
+    badge.append(retry);
+  }
+  card.append(badge);
+  paintImageUpload(card, job);
+  if (editing && !job.busy && !job.error && !job.cancelled) queueMicrotask(() => runImageUpload(ref));
+}
+function paintImageUpload(card, job) {
+  card.querySelector("[data-image-upload-status]").textContent = job.error || "Uploading image\u2026";
+  const retry = card.querySelector("[data-image-upload-retry]");
+  if (retry) retry.hidden = !job.error || job.busy;
+}
+function refreshImageUpload(ref) {
+  const job = imageJobs.get(ref);
+  if (!job) return;
+  for (const card of document.querySelectorAll('[data-media-kind="image"]')) if (card.dataset.ref === ref && card.querySelector("[data-image-upload-status]")) paintImageUpload(card, job);
+}
+async function runImageUpload(ref) {
+  const job = imageJobs.get(ref);
+  if (!job || job.busy || job.cancelled || !editorAuthorized) return;
+  job.busy = true;
+  job.error = "";
+  job.controller = new AbortController();
+  pendingWrites++;
+  refreshImageUpload(ref);
+  try {
+    const url = await uploadR2Image(job.asset.blob, $3("#sign-out-csrf").value, job.controller.signal);
+    if (job.cancelled) return;
+    job.asset.r2URL = url;
+    job.asset.r2Pending = false;
+    await writeRecords("assets", [job.asset]);
+    if (job.cancelled) return;
+    for (const card of document.querySelectorAll('[data-media-kind="image"]')) {
+      if (card.dataset.ref !== ref) continue;
+      card.dataset.ref = url;
+      card.querySelector("img").src = url;
+      card.querySelector(".upload-overlay")?.remove();
+    }
+    const writes = [];
+    if (activeId && editorAuthorized) writes.push(saveEditor());
+    for (const entry of [homeEntry, ...entries2.values()]) {
+      if (!entry || entry.deleted) continue;
+      const markdown = entry.markdown.replaceAll(`](${mdDestination(ref)})`, `](${url})`);
+      if (markdown !== entry.markdown) {
+        entry.markdown = markdown;
+        writes.push(persist(entry));
+      }
+    }
+    await Promise.all(writes);
+    imageJobs.delete(ref);
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      job.error = error.message || "Image upload interrupted. Retry to upload again.";
+    }
+  } finally {
+    job.busy = false;
+    pendingWrites--;
+    refreshImageUpload(ref);
   }
 }
 function download(blob, name) {
@@ -6435,7 +6561,7 @@ async function exportEntry(bundle) {
     for (const ref of new Set(refs)) {
       if (assets.get(ref)?.blob) files[ref] = new Uint8Array(await assets.get(ref).blob.arrayBuffer());
       else if (ref === "./sample.svg" || ref === "sample.svg") files["sample.svg"] = new Uint8Array(await (await fetch("/sample.svg")).arrayBuffer());
-      else if (!youtubeID(ref)) missing.push(ref);
+      else if (!youtubeID(ref) && !r2ImageURL(ref)) missing.push(ref);
     }
     files["README.txt"] = strToU8("This local garden export contains a Markdown page and its available local media.\nImport the ZIP into the local editor to restore both. The first # heading is the title.\nImages: ![description](assets/file.png)\nVideos: [Video: description](assets/file.mp4)\nYouTube: a plain URL on its own line; no player or upload is included.\n" + (missing.length ? `
 Unavailable media (references retained):
@@ -6829,6 +6955,7 @@ function bindEvents() {
 }
 async function boot() {
   try {
+    await loadImageConfig();
     db = await openDB();
     const [storedEntries, storedAssets] = await Promise.all([allRecords("entries"), allRecords("assets")]);
     storedAssets.forEach((asset) => assets.set(asset.path, asset));

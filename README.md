@@ -1,6 +1,6 @@
 # CyberGarden — local garden and editor
 
-A quiet personal garden with a separate document editor. Pages and media remain in the browser's local IndexedDB. The loopback Python server protects editor access using Supabase Auth, Google sign-in, and an exact owner email allowlist. There is no content backend, publishing, analytics, or remote font. YouTube embeds also support uploading a local video to your channel through a separate Google OAuth connection.
+A quiet personal garden with a separate document editor. Page text and existing media remain in the browser's local IndexedDB; newly added images upload to Cloudflare R2 once configured. The loopback Python server protects editor access using Supabase Auth, Google sign-in, and an exact owner email allowlist. There is no content backend, publishing, analytics, or remote font. YouTube embeds also support uploading a local video to your channel through a separate Google OAuth connection.
 
 ## Try it
 
@@ -60,7 +60,7 @@ This protects the editor delivered by the server. As requested, content is still
 
 `content/entries.json` holds starter records with separate `title` and `markdown` fields. It is loaded only when this browser has no saved entries. `content/home.json` supplies Home on first use; an existing garden receives this Home record without replacing any of its pages. Home uses the reserved storage ID `__garden_home__`. Editing does not change the source files. Browser edits and selected media are saved to IndexedDB (`cybergarden-local-v1`) on this exact origin, including its port. Use the same preview URL and browser to return to them. Browser storage can be cleared or evicted; exports are the portable copy. This prototype does not sync tabs or devices.
 
-The rich editor converts its document to Markdown on each change. The public garden renders that Markdown. Supported content includes headings, paragraphs, emphasis, links, lists, images, and video references. Raw HTML is displayed as text; rich clipboard HTML is pasted as plain text. Remote image references show placeholders to keep the prototype local.
+The rich editor converts its document to Markdown on each change. The public garden renders that Markdown. Supported content includes headings, paragraphs, emphasis, links, lists, images, and video references. Raw HTML is displayed as text; rich clipboard HTML is pasted as plain text. Image URLs from the configured R2 image origin render normally. Other remote image references show placeholders.
 
 ## Take a page out and bring it back
 
@@ -137,3 +137,35 @@ The uploader accepts files up to 256 GB; YouTube also limits duration to 12 hour
 References: [resumable upload protocol](https://developers.google.com/youtube/data/guides/using_resumable_upload_protocol), [OAuth web-server flow](https://developers.google.com/identity/protocols/oauth2/web-server), [YouTube API discovery](https://www.googleapis.com/discovery/v1/apis/youtube/v3/rest), [upload UI requirements](https://developers.google.com/youtube/terms/required-minimum-functionality), [upload limits](https://support.google.com/youtube/answer/71673).
 
 Focused checks: `python3 -m unittest discover -s tests -p 'test_*.py'` and `node --test tests/youtube-upload.test.mjs`. These use provider fixtures; a real Google connection and upload require the configuration above.
+
+## Cloudflare R2 images
+
+**Add image** and clipboard image paste insert a local preview immediately and automatically upload the image to R2. A small status overlay shows upload activity and **Retry** on failure. The resulting page stores a permanent public HTTPS image URL in ordinary Markdown. Removing an image block stops an in-flight upload; it removes the page reference and does not delete an object already stored in R2. Existing local images are preserved; they are not migrated automatically.
+
+Setup:
+
+1. Activate R2 in your Cloudflare account. It includes a free allowance with usage-based charges above it.
+2. Create the **cybergarden-images** bucket with Standard storage.
+3. Create an **Object Read & Write** R2 S3 credential restricted to this bucket. Put `R2_ACCOUNT_ID`, `R2_BUCKET_NAME`, `R2_ACCESS_KEY_ID`, and `R2_SECRET_ACCESS_KEY` in ignored `.env.local`. Keep the secret out of frontend code.
+4. Set `R2_PUBLIC_BASE_URL` to the HTTPS image domain. For local review you can enable the bucket's Public Development URL (`https://pub-....r2.dev`); Cloudflare rate-limits this endpoint and recommends a custom domain for production. Bucket objects must be intentionally public for garden visitors to view them.
+5. Add the following bucket CORS policy (also saved in `config/r2-cors.json`). Use your exact APP_ORIGIN; when deploying, add the deployed editor origin too.
+
+```json
+[
+  {
+    "AllowedOrigins": ["http://localhost:4183"],
+    "AllowedMethods": ["PUT", "GET", "HEAD"],
+    "AllowedHeaders": ["Content-Type"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+Run `npm ci` to install the AWS S3 signing dependencies, then restart `npm start`. The Python server uses the Node helper `scripts/sign-r2-upload.mjs` to create five-minute presigned PUT URLs, signed for a random image key, MIME type, and exact content length. The browser uploads bytes directly to R2. Only an owner session with a valid same-origin CSRF token can request an upload URL. Public `/media/config` returns only the image origin, configured status, and upload limit. No R2 credential is sent to the browser or written to logs.
+
+PNG, JPEG, GIF, WebP, and AVIF images are accepted up to 40 MB each. A local IndexedDB copy remains as a recovery backup; the saved page points to R2 once the upload succeeds. Pending image uploads can retry from that backup after reopening the editor. R2 image URLs remain external references in Markdown/ZIP exports; they are not downloaded into exported ZIPs. Switching image domains later requires updating saved image URLs or preserving the old image origin.
+
+Text content is still local. This feature does not migrate text to Supabase or deploy the application.
+
+Official references: [R2 presigned uploads](https://developers.cloudflare.com/r2/api/s3/presigned-urls/), [R2 CORS](https://developers.cloudflare.com/r2/buckets/cors/), [public image delivery](https://developers.cloudflare.com/r2/buckets/public-buckets/).

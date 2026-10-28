@@ -1,3 +1,4 @@
+import { loadImageConfig, r2ImageURL, uploadR2Image } from './r2-images.js';
 import { bindYouTubeUpload, restoreYouTubeUploads, uploadReference, mountUploadPlaceholder, completedUpload, stopYouTubeUpload } from './youtube-upload.js';
 import { marked } from 'marked';
 import TurndownService from 'turndown';
@@ -15,6 +16,7 @@ const titleInput = $('#entry-title');
 const entries = new Map();
 const assets = new Map();
 const urls = new Map();
+const imageJobs = new Map();
 const HOME_ID = '__garden_home__';
 let homeEntry;
 let pageReferencePicker;
@@ -98,6 +100,7 @@ function assetURL(path) {
   return urls.get(path);
 }
 function mediaBlock(kind, ref, label, editing) {
+  if (kind === 'image' && assets.get(ref)?.r2URL && r2ImageURL(assets.get(ref).r2URL)) ref = assets.get(ref).r2URL;
   if (uploadReference(ref) && completedUpload(ref)) return mediaBlock('youtube', completedUpload(ref), label, editing);
   const card = document.createElement('figure');
   card.className = 'media-block';
@@ -128,7 +131,7 @@ function mediaBlock(kind, ref, label, editing) {
     card.append(player);
     return card;
   }
-  const media = kind === 'youtube' ? null : assetURL(ref);
+  const media = kind === 'youtube' ? null : (kind === 'image' && r2ImageURL(ref)) || assetURL(ref);
   if (kind === 'image' && media) {
     const img = document.createElement('img'); img.src = media; img.alt = label || 'Image'; card.append(img);
   } else if (kind === 'video' && media) {
@@ -141,6 +144,7 @@ function mediaBlock(kind, ref, label, editing) {
     detail.textContent = kind === 'youtube' ? 'Unsupported YouTube URL.' : `${ref} · Media file not available locally. Import its garden ZIP to restore it.`;
     card.append(name, detail);
   }
+  if (kind === 'image') attachImageUpload(card, ref, editing);
   return card;
 }
 const renderer = new marked.Renderer();
@@ -194,6 +198,8 @@ function saveEditor() {
 function removeMedia(media) {
   const target = caretTargetBesideMedia(media);
   if (uploadReference(media.dataset.ref)) stopYouTubeUpload(media.dataset.ref);
+  const imageJob = imageJobs.get(media.dataset.ref);
+  if (imageJob) { imageJob.cancelled = true; imageJob.controller?.abort(); }
   unmountYouTubePlayers(media);
   media.remove();
   savedRange = focusTextCaret(body, target).cloneRange();
@@ -445,13 +451,67 @@ async function addFiles(files, kind) {
     if (kind === 'video' && !file.type.startsWith('video/')) { notice('Choose a video file for a local preview.', true); continue; }
     if (file.size > 40 * 1024 * 1024) { notice('For this prototype, choose a file smaller than 40 MB.', true); continue; }
     const path = `assets/${crypto.randomUUID()}-${slug(file.name)}`;
-    const asset = { path, name: file.name, blob: file };
+    const asset = { path, name: file.name, blob: file, ...(kind === 'image' ? {r2Pending:true} : {}) };
     try {
       await writeRecords('assets', [asset]); assets.set(path, asset);
       if (activeId !== owner || $('#editor-shell').hidden) { notice('The page changed before the file was inserted. Select it again in the intended page.'); return; }
       insertNode(mediaBlock(kind, path, file.name.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' '), true));
     } catch { notice('There is not enough browser storage for this file. Try a smaller one.', true); }
   }
+}
+function attachImageUpload(card, ref, editing) {
+  const asset = assets.get(ref);
+  if (!asset?.r2Pending || !asset.blob) return;
+  let job = imageJobs.get(ref);
+  if (!job) { job = {asset, busy:false, error:''}; imageJobs.set(ref, job); }
+  const badge = document.createElement('div'); badge.className = 'upload-overlay';
+  const status = document.createElement('span'); status.dataset.imageUploadStatus = ''; badge.append(status);
+  if (editing) {
+    const retry = document.createElement('button'); retry.type = 'button'; retry.dataset.imageUploadRetry = ''; retry.textContent = 'Retry';
+    retry.addEventListener('click', () => { job.cancelled = false; runImageUpload(ref); }); badge.append(retry);
+  }
+  card.append(badge);
+  paintImageUpload(card, job);
+  if (editing && !job.busy && !job.error && !job.cancelled) queueMicrotask(() => runImageUpload(ref));
+}
+function paintImageUpload(card, job) {
+  card.querySelector('[data-image-upload-status]').textContent = job.error || 'Uploading image…';
+  const retry = card.querySelector('[data-image-upload-retry]');
+  if (retry) retry.hidden = !job.error || job.busy;
+}
+function refreshImageUpload(ref) {
+  const job = imageJobs.get(ref);
+  if (!job) return;
+  for (const card of document.querySelectorAll('[data-media-kind="image"]')) if (card.dataset.ref === ref && card.querySelector('[data-image-upload-status]')) paintImageUpload(card, job);
+}
+async function runImageUpload(ref) {
+  const job = imageJobs.get(ref);
+  if (!job || job.busy || job.cancelled || !editorAuthorized) return;
+  job.busy = true; job.error = ''; job.controller = new AbortController(); pendingWrites++; refreshImageUpload(ref);
+  try {
+    const url = await uploadR2Image(job.asset.blob, $('#sign-out-csrf').value, job.controller.signal);
+    if (job.cancelled) return;
+    // Save the remote reference alongside the local backup before updating pages.
+    job.asset.r2URL = url; job.asset.r2Pending = false;
+    await writeRecords('assets', [job.asset]);
+    if (job.cancelled) return;
+    for (const card of document.querySelectorAll('[data-media-kind="image"]')) {
+      if (card.dataset.ref !== ref) continue;
+      card.dataset.ref = url; card.querySelector('img').src = url;
+      card.querySelector('.upload-overlay')?.remove();
+    }
+    const writes = [];
+    if (activeId && editorAuthorized) writes.push(saveEditor());
+    for (const entry of [homeEntry, ...entries.values()]) {
+      if (!entry || entry.deleted) continue;
+      const markdown = entry.markdown.replaceAll(`](${mdDestination(ref)})`, `](${url})`);
+      if (markdown !== entry.markdown) { entry.markdown = markdown; writes.push(persist(entry)); }
+    }
+    await Promise.all(writes);
+    imageJobs.delete(ref);
+  } catch (error) {
+    if (error.name !== 'AbortError') { job.error = error.message || 'Image upload interrupted. Retry to upload again.'; }
+  } finally { job.busy = false; pendingWrites--; refreshImageUpload(ref); }
 }
 function download(blob, name) {
   const url = URL.createObjectURL(blob), link = document.createElement('a'); link.href = url; link.download = name; link.click(); setTimeout(() => URL.revokeObjectURL(url), 30000);
@@ -469,7 +529,7 @@ async function exportEntry(bundle) {
     for (const ref of new Set(refs)) {
       if (assets.get(ref)?.blob) files[ref] = new Uint8Array(await assets.get(ref).blob.arrayBuffer());
       else if (ref === './sample.svg' || ref === 'sample.svg') files['sample.svg'] = new Uint8Array(await (await fetch('/sample.svg')).arrayBuffer());
-      else if (!youtubeID(ref)) missing.push(ref);
+      else if (!youtubeID(ref) && !r2ImageURL(ref)) missing.push(ref);
     }
     files['README.txt'] = strToU8('This local garden export contains a Markdown page and its available local media.\nImport the ZIP into the local editor to restore both. The first # heading is the title.\nImages: ![description](assets/file.png)\nVideos: [Video: description](assets/file.mp4)\nYouTube: a plain URL on its own line; no player or upload is included.\n' + (missing.length ? `\nUnavailable media (references retained):\n${missing.join('\n')}\n` : ''));
     download(new Blob([zipSync(files, { level: 0 })], { type: 'application/zip' }), `${slug(titleFor(entry))}.zip`);
@@ -776,6 +836,7 @@ function bindEvents() {
 }
 async function boot() {
   try {
+    await loadImageConfig();
     db = await openDB();
     const [storedEntries, storedAssets] = await Promise.all([allRecords('entries'), allRecords('assets')]);
     storedAssets.forEach(asset => assets.set(asset.path, asset));
