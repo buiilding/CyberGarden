@@ -1,4 +1,4 @@
-// Tokens never enter the browser. This endpoint validates the HttpOnly session
+// Supabase tokens never enter the browser. This endpoint validates the HttpOnly session
 // with Supabase and applies the owner allowlist on the local server.
 export async function readEditorSession(request = fetch) {
   try {

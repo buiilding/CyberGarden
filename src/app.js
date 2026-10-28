@@ -1,3 +1,4 @@
+import { bindYouTubeUpload } from './youtube-upload.js';
 import { marked } from 'marked';
 import TurndownService from 'turndown';
 import DOMPurify from 'dompurify';
@@ -397,7 +398,9 @@ function showWritingMenu(event) {
   const y = fromKeyboard ? keyboardY : event.clientY;
   menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - menu.offsetHeight - 8))}px`;
-  menu.querySelector('button').focus({ preventScroll: true });
+  // Pointer opening starts with no selected item; keyboard opening selects the first.
+  menu.tabIndex = -1;
+  (fromKeyboard ? menu.querySelector('button') : menu).focus({ preventScroll: true });
 }
 function insertNode(node) {
   restoreSelection();
@@ -657,6 +660,16 @@ function bindEvents() {
   window.addEventListener('resize', () => closeBlockMenu());
   window.addEventListener('blur', () => closeBlockMenu());
   body.addEventListener('contextmenu', showWritingMenu);
+  const openYouTubeUpload = bindYouTubeUpload({
+    capture() { rememberSelection(); return { owner: activeId, range: savedRange?.cloneRange() }; },
+    insert(target, url) {
+      if (!editorAuthorized || activeId !== target.owner || $('#editor-shell').hidden || !target.range || !body.contains(target.range.commonAncestorContainer)) return false;
+      const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(target.range);
+      savedRange = target.range.cloneRange();
+      insertNode(mediaBlock('youtube', url, '', true));
+      return true;
+    },
+  });
   const writingMenu = $('#writing-menu');
   writingMenu.addEventListener('mousedown', event => event.preventDefault());
   writingMenu.addEventListener('click', event => {
@@ -664,7 +677,8 @@ function bindEvents() {
     if (!button) return;
     closeWritingMenu(true);
     const kind = button.dataset.insert;
-    if (kind === 'youtube') showInsert('youtube');
+    if (kind === 'youtube-upload') openYouTubeUpload();
+    else if (kind === 'youtube') showInsert('youtube');
     else if (kind === 'image' || kind === 'video') {
       rememberSelection();
       $(`#${kind}-file`).click();
@@ -675,7 +689,7 @@ function bindEvents() {
     const index = buttons.indexOf(document.activeElement);
     if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
       event.preventDefault();
-      const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : index < 0 ? (event.key === 'ArrowDown' ? 0 : buttons.length - 1) : (index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
       buttons[next].focus();
     } else if (event.key === 'Escape' || event.key === 'Tab') {
       event.preventDefault(); closeWritingMenu(true);

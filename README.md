@@ -1,6 +1,6 @@
 # CyberGarden — local garden and editor
 
-A quiet personal garden with a separate document editor. Pages and media remain in the browser's local IndexedDB. The loopback Python server protects editor access using Supabase Auth, Google sign-in, and an exact owner email allowlist. There is no content backend, publishing, analytics, or remote font. Existing YouTube previews are unchanged; this auth work adds no YouTube API, upload, or scopes.
+A quiet personal garden with a separate document editor. Pages and media remain in the browser's local IndexedDB. The loopback Python server protects editor access using Supabase Auth, Google sign-in, and an exact owner email allowlist. There is no content backend, publishing, analytics, or remote font. YouTube embeds also support uploading a local video to your channel through a separate Google OAuth connection.
 
 ## Try it
 
@@ -46,12 +46,12 @@ This protects the editor delivered by the server. As requested, content is still
 - Click into the page title or body and type. Use the toolbar for headings and bold. No Markdown or HTML typing is needed.
 - In the body of Home or any page, type `!` at the start of a line or after a space to find a page. Keep typing to search its title, including multiple words; use Up/Down and Enter, or click a result. The title becomes an underlined link and writing continues after it. Escape keeps your literal `!query`. Links export as ordinary Markdown, such as `[A small note](/page/note)`, with stable page IDs; Home links to `/`.
 - **Home** is fixed at the top of the editor sidebar and opens at `/editor/home` (also the default at `/editor`). Edit its title and body with the same text and media controls, then use **Save ↗** to open the homepage at `/`. Home is stored separately from ordinary pages and does not appear in All Pages.
-- Right-click inside the page body for **Add image**, **Upload video**, and **YouTube URL** at that position. Press Escape or click outside to dismiss the menu.
+- Right-click inside the page body for **Add image** and **Upload video** at that position. Press Escape or click outside to dismiss the menu.
 - Paste an image from your clipboard at the text cursor, or choose **Add image**. Supported images: PNG, JPEG, GIF, WebP, AVIF.
 - Hover over an image or video to show its trash icon at the top right. Click it to remove that media item, or select the item and press Backspace or Delete. The icon also appears when the media has keyboard focus.
 - If the page ends with media, the editor keeps a typing line beneath it. With a media block selected, Enter or Arrow Down moves into text below; Arrow Up moves into text above, creating a paragraph only when needed. Clicking the blank area below the content also places the cursor at the end. Empty helper paragraphs stay out of exported Markdown; text you type into them is kept.
-- Choose **Upload video** for a local file preview with playback controls. Videos start muted, with autoplay off; use the volume control to unmute. Playback depends on the browser's supported codecs. Files are limited to 40 MB each for this prototype.
-- Paste a YouTube URL on its own, or use **YouTube URL**. It becomes a playable YouTube embed in the editor and garden. The player uses youtube-nocookie.com and requires internet access. The IFrame Player API calls `mute()` when the player is ready, with autoplay off; viewers can unmute normally. No API key, upload, Google account connection, or YouTube Data API is used. Some videos disallow embedding and cannot play inside the page.
+- Choose **Upload video** to upload a local video to your connected YouTube channel and insert it after processing. See the setup instructions below.
+- Paste a YouTube URL on its own. It becomes a playable YouTube embed in the editor and garden. The player uses youtube-nocookie.com and requires internet access. The IFrame Player API calls `mute()` when the player is ready, with autoplay off; viewers can unmute normally. Existing-link previews need no API key or account connection. Some videos disallow embedding and cannot play inside the page.
 - Choose **+ New page**, or **Import Markdown…** on an ordinary page to create a page from a `.md` file or a garden ZIP. When Home is selected, **Import Home Markdown…** replaces Home's content instead. An initial `# Heading` becomes the separate title; the remaining Markdown is the body. Both export controls work for Home, too.
 - Use **Save ↗** to open the saved page in the garden. They also appear under **All Pages**.
 - **Delete** removes an ordinary page from the editor and garden, including after a reload. Deleting the last ordinary page returns to Home. Home is fixed and has no Delete control; its content can be cleared or changed. Starter pages do not return automatically.
@@ -116,3 +116,24 @@ node --check script.js
 Auth integration tests run real loopback HTTP requests against an isolated Supabase/Google protocol fixture: PKCE, owner rejection, session validation/refresh, logout, CSRF, expiry, private-file access, and the referrer policies required for native login/logout forms. There is no bypass switch in the app and automated tests do not use real accounts or change real services. DOM tests cover public rendering, editor authorization and local saves, plus page-picker logic with simulated selection and geometry. In this checkout, Google consent, owner editor access, sign-out, and rejection of a signed-out direct editor visit were also verified in Chrome using the configured account. Browser verification did not change page text. A fresh checkout still needs the configuration above; real credentials remain outside Git.
 
 The bundle contains marked, Turndown, DOMPurify, and fflate. Application dependencies are bundled locally; YouTube players load from YouTube when a video is shown. Keep the server bound to `127.0.0.1` for local review.
+
+## Upload a local video to YouTube
+
+In the editor, place the cursor, right-click, and choose **Upload video**. Choose a local video. The dialog prefills its title from the filename, allows an optional description, defaults to **Unlisted**, and offers Public or Private plus the made-for-kids setting. Connect YouTube, check the displayed channel, then choose **Upload and insert**. Public and Unlisted allow visitors to watch; Private generally does not.
+
+One-time local setup (separate from the Supabase editor login):
+
+1. Enable **YouTube Data API v3** in your Google Cloud project. Configure the OAuth consent screen; add your Google account as a test user while the app is in Testing.
+2. Create a Google **Web application** OAuth client. Add the exact redirect URI `http://localhost:4183/youtube/callback` (or the configured `http://127.0.0.1:4183/youtube/callback`). This is separate from Supabase's callback. Add your APP_ORIGIN as an authorized JavaScript origin.
+3. Set `YOUTUBE_CLIENT_ID` and `YOUTUBE_CLIENT_SECRET` in your ignored `.env.local`, then restart `npm start`. The server never serves this file. Do not paste credentials into the editor.
+4. In the upload dialog, **Connect YouTube** and grant upload plus read access. Read access is used to identify the channel and wait for video processing. Google API discovery lists `youtube.readonly` for `videos.list`; the upload-only scope is insufficient for the whole flow.
+
+Uploads use 8 MiB file slices sent directly from the browser to Google's resumable endpoint. Upload progress and YouTube processing are separate stages. Retry resumes an interrupted upload or checks the already uploaded video; it does not intentionally upload a second copy. Keep the dialog/tab open. A reload loses the local upload job. Cancel stops sending bytes or waiting; it does not delete a video already uploaded to the channel. Inserting the completed video uses the original page and cursor, then saves an ordinary YouTube URL in Markdown. If that position is no longer valid, the dialog shows the video link instead.
+
+YouTube authorization state and refresh tokens live only in the local server's owner session, disappearing on logout/session expiration or server restart. A short-lived YouTube access token enters browser memory for the direct upload; neither token nor the resumable session URI is saved in IndexedDB, exports, or logs. Refresh-token expiration or revocation may require reconnecting. Google External Testing refresh tokens expire after seven days. This loopback implementation does not provide production token storage, background uploads, or a Vercel/Supabase content migration.
+
+The uploader accepts files up to 256 GB; YouTube also limits duration to 12 hours and requires channel verification for uploads longer than 15 minutes. Processing success does not override YouTube's copyright, age, regional, or embedding restrictions. The server supplies the normal cross-origin Referer needed by embedded players.
+
+References: [resumable upload protocol](https://developers.google.com/youtube/data/guides/using_resumable_upload_protocol), [OAuth web-server flow](https://developers.google.com/identity/protocols/oauth2/web-server), [YouTube API discovery](https://www.googleapis.com/discovery/v1/apis/youtube/v3/rest), [upload UI requirements](https://developers.google.com/youtube/terms/required-minimum-functionality), [upload limits](https://support.google.com/youtube/answer/71673).
+
+Focused checks: `python3 -m unittest discover -s tests -p 'test_*.py'` and `node --test tests/youtube-upload.test.mjs`. These use provider fixtures; a real Google connection and upload require the configuration above.

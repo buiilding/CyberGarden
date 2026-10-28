@@ -1,3 +1,292 @@
+// src/youtube-upload.js
+var $ = (selector) => document.querySelector(selector);
+var delay = (ms, signal) => new Promise((resolve, reject) => {
+  const abort = () => {
+    clearTimeout(timer);
+    reject(new DOMException("Stopped", "AbortError"));
+  };
+  const timer = setTimeout(() => {
+    signal?.removeEventListener("abort", abort);
+    resolve();
+  }, ms);
+  if (signal?.aborted) abort();
+  else signal?.addEventListener("abort", abort, { once: true });
+});
+async function api(path, values = {}, signal) {
+  const response = await fetch(`/youtube/${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ csrf: $("#sign-out-csrf").value, ...values }),
+    signal
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || "YouTube request failed. Sign in again if your editor session expired.");
+  return result;
+}
+function transfer(url, token, blob, range, signal, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", url);
+    xhr.timeout = 12e4;
+    xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    xhr.setRequestHeader("Content-Type", blob?.type || "application/octet-stream");
+    xhr.setRequestHeader("Content-Range", range);
+    xhr.upload.onprogress = (event) => onProgress(event.loaded);
+    const abort = () => xhr.abort();
+    signal.addEventListener("abort", abort, { once: true });
+    const clean = () => signal.removeEventListener("abort", abort);
+    xhr.onload = () => {
+      clean();
+      let data = {};
+      try {
+        data = JSON.parse(xhr.responseText || "{}");
+      } catch {
+      }
+      const exposed = xhr.getAllResponseHeaders().toLowerCase();
+      resolve({ status: xhr.status, range: exposed.includes("range:") ? xhr.getResponseHeader("Range") : null, retry: exposed.includes("retry-after:") ? xhr.getResponseHeader("Retry-After") : null, data });
+    };
+    xhr.onerror = xhr.ontimeout = () => {
+      clean();
+      resolve({ status: 0 });
+    };
+    xhr.onabort = () => {
+      clean();
+      reject(new DOMException("Stopped", "AbortError"));
+    };
+    if (signal.aborted) {
+      clean();
+      reject(new DOMException("Stopped", "AbortError"));
+      return;
+    }
+    xhr.send(blob);
+  });
+}
+async function uploadVideo(job, metadata, signal, onProgress) {
+  let token = (await api("token", {}, signal)).access_token;
+  if (!job.uri) {
+    const response = await fetch("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", {
+      method: "POST",
+      signal,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "X-Upload-Content-Length": String(job.file.size),
+        "X-Upload-Content-Type": job.file.type || "application/octet-stream"
+      },
+      body: JSON.stringify({ snippet: { title: metadata.title, description: metadata.description, categoryId: "22" }, status: {
+        privacyStatus: metadata.visibility,
+        embeddable: true,
+        selfDeclaredMadeForKids: metadata.madeForKids
+      } })
+    });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result.error?.message || `YouTube could not start the upload (${response.status}).`);
+    }
+    const uri = response.headers.get("Location");
+    const parsed = uri && new URL(uri);
+    if (!parsed || parsed.protocol !== "https:" || parsed.hostname !== "www.googleapis.com" || !parsed.pathname.startsWith("/upload/youtube/")) throw new Error("YouTube returned an invalid upload address.");
+    job.uri = uri;
+  }
+  let offset = 0, probe = true, retries = 0;
+  while (!job.videoId) {
+    const end = Math.min(offset + 8 * 1024 * 1024, job.file.size);
+    const response = await transfer(
+      job.uri,
+      token,
+      probe ? null : job.file.slice(offset, end, job.file.type || "application/octet-stream"),
+      probe ? `bytes */${job.file.size}` : `bytes ${offset}-${end - 1}/${job.file.size}`,
+      signal,
+      (loaded) => onProgress(Math.min(job.file.size, offset + loaded), job.file.size)
+    );
+    if (response.status === 200 || response.status === 201) {
+      if (!/^[A-Za-z0-9_-]{11}$/.test(response.data.id || "")) throw new Error("YouTube did not return a video ID. Retry to check the upload.");
+      job.videoId = response.data.id;
+      onProgress(job.file.size, job.file.size);
+      return;
+    }
+    if (response.status === 308) {
+      const confirmed = response.range?.match(/^bytes=0-(\d+)$/);
+      const next2 = confirmed ? Number(confirmed[1]) + 1 : 0;
+      if (next2 > job.file.size) throw new Error("YouTube returned an invalid upload position.");
+      if (next2 <= offset && (!probe || offset === job.file.size)) {
+        if (++retries > 5) throw new Error("YouTube stopped accepting bytes. Retry to resume.");
+        await delay(2e3, signal);
+      } else retries = 0;
+      offset = next2;
+      probe = false;
+      onProgress(offset, job.file.size);
+      if (offset === job.file.size) probe = true;
+      continue;
+    }
+    if (response.status === 404) {
+      job.uri = null;
+      throw new Error("The upload session expired. Retry to start the upload again.");
+    }
+    if (response.status === 401 || response.status === 0 || response.status === 429 || response.status >= 500) {
+      if (++retries > 5) throw new Error("Upload interrupted. Keep this dialog open and retry to resume.");
+      if (response.status === 401) token = (await api("token", { refresh: "true" }, signal)).access_token;
+      const retrySeconds = Number(response.retry) || 0;
+      await delay(Math.min(6e4, Math.max(retrySeconds * 1e3, 1e3 * 2 ** retries)), signal);
+      probe = true;
+      continue;
+    }
+    throw new Error(response.data?.error?.message || `YouTube rejected the upload (${response.status}).`);
+  }
+}
+async function waitForVideo(id, signal, report) {
+  const deadline = Date.now() + 30 * 60 * 1e3;
+  let interval = 3e3;
+  while (Date.now() < deadline) {
+    const video = await api("video", { id }, signal);
+    const status = video.status || {}, processing = video.processingDetails || {};
+    if (["failed", "rejected", "deleted"].includes(status.uploadStatus) || processing.processingStatus === "failed")
+      throw new Error(`YouTube could not process the video: ${status.rejectionReason || status.failureReason || processing.processingFailureReason || status.uploadStatus}.`);
+    if (processing.processingStatus === "succeeded" || status.uploadStatus === "processed") {
+      if (status.embeddable === false) throw new Error("This video has embedding disabled. Enable embedding in YouTube Studio, then retry.");
+      return;
+    }
+    report("Uploaded. Waiting for YouTube to finish processing\u2026");
+    await delay(interval, signal);
+    interval = Math.min(15e3, interval * 1.4);
+  }
+  throw new Error("YouTube is still processing. Retry to check again; the file will not be uploaded twice.");
+}
+function bindYouTubeUpload({ capture, insert }) {
+  const dialog = $("#youtube-upload-dialog"), form = $("#youtube-upload-form"), input = $("#youtube-upload-file");
+  const status = $("#youtube-upload-status"), error = $("#youtube-upload-error"), submit = $("#youtube-upload-submit");
+  const connect = $("#youtube-connect"), progress = $("#youtube-upload-progress");
+  let target, job, controller, busy = false, popup;
+  const report = (message) => {
+    status.textContent = message;
+  };
+  const updateConnection = async () => {
+    const response = await fetch("/youtube/status", { cache: "no-store" });
+    if (!response.ok) throw new Error("Sign in to the editor again.");
+    const connection = await response.json();
+    connect.disabled = !connection.configured || busy;
+    submit.disabled = !connection.connected || busy;
+    connect.textContent = connection.connected ? "Change YouTube channel" : "Connect YouTube";
+    report(connection.connected ? `Upload to ${connection.channel}` : connection.configured ? "Connect your YouTube channel to upload." : "YouTube needs setup: add YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET to .env.local, then restart. See README.md.");
+    return connection.connected;
+  };
+  input.addEventListener("change", async () => {
+    const file = input.files[0];
+    input.value = "";
+    if (!file) return;
+    form.reset();
+    error.textContent = "";
+    progress.hidden = true;
+    submit.disabled = true;
+    job = { file };
+    $("#youtube-upload-title").value = file.name.replace(/\.[^.]+$/, "").slice(0, 100) || "Untitled video";
+    $("#youtube-upload-filename").textContent = file.name;
+    dialog.showModal();
+    try {
+      await updateConnection();
+    } catch (failure) {
+      error.textContent = failure.message;
+    }
+  });
+  connect.addEventListener("click", async () => {
+    error.textContent = "";
+    popup = window.open("about:blank", "cybergarden-youtube", "popup,width=600,height=740");
+    if (!popup) {
+      error.textContent = "Allow popups to connect your YouTube channel.";
+      return;
+    }
+    connect.disabled = true;
+    submit.disabled = true;
+    try {
+      const connection = await api("connect");
+      popup.location.href = connection.url;
+      report("Choose your YouTube channel in the Google window, then return here.");
+      const deadline = Date.now() + 10 * 60 * 1e3;
+      while (!popup.closed && Date.now() < deadline) {
+        await delay(1e3);
+        let finished = false;
+        try {
+          finished = popup.location.pathname === "/youtube/connected";
+        } catch {
+        }
+        if (finished) {
+          popup.close();
+          break;
+        }
+      }
+      if (!await updateConnection()) throw new Error("YouTube connection was not completed. Try again.");
+    } catch (failure) {
+      popup?.close();
+      error.textContent = failure.message;
+      connect.disabled = false;
+    }
+  });
+  const stop = () => {
+    controller?.abort();
+    popup?.close();
+    dialog.close();
+  };
+  $("#youtube-upload-cancel").addEventListener("click", stop);
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    stop();
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (busy || !job) return;
+    const title = $("#youtube-upload-title").value.trim(), description = $("#youtube-upload-description").value;
+    if (!title || [...title].length > 100 || /[<>]/.test(title)) {
+      error.textContent = "Use a title of 1\u2013100 characters without < or >.";
+      return;
+    }
+    if (new TextEncoder().encode(description).length > 5e3 || /[<>]/.test(description)) {
+      error.textContent = "Description must be at most 5,000 bytes, without < or >.";
+      return;
+    }
+    if (!job.file.type.startsWith("video/") && job.file.type && job.file.type !== "application/octet-stream" || !job.file.size || job.file.size > 256e9) {
+      error.textContent = "Choose a video file up to 256 GB.";
+      return;
+    }
+    controller = new AbortController();
+    busy = true;
+    error.textContent = "";
+    submit.disabled = connect.disabled = true;
+    form.querySelector("fieldset").disabled = true;
+    try {
+      if (!job.videoId) await uploadVideo(job, { title, description, visibility: $("#youtube-upload-visibility").value, madeForKids: $("#youtube-upload-kids").value === "yes" }, controller.signal, (sent, total) => {
+        progress.hidden = false;
+        progress.value = sent / total;
+        report(`Uploading to YouTube\u2026 ${Math.floor(sent / total * 100)}%`);
+      });
+      progress.hidden = true;
+      await waitForVideo(job.videoId, controller.signal, report);
+      const url = `https://www.youtube.com/watch?v=${job.videoId}`;
+      if (!insert(target, url)) throw new Error(`Uploaded, but the original editing position changed. Add this URL in the intended page: ${url}`);
+      dialog.close();
+      job = null;
+    } catch (failure) {
+      if (failure.name !== "AbortError") error.textContent = failure.message + (job?.videoId ? ` Video link: https://www.youtube.com/watch?v=${job.videoId}` : "");
+    } finally {
+      busy = false;
+      submit.disabled = false;
+      connect.disabled = !!job?.uri || !!job?.videoId;
+      form.querySelector("fieldset").disabled = !!job?.uri || !!job?.videoId;
+      submit.textContent = job?.videoId ? "Check processing and insert" : job?.uri ? "Resume upload" : "Upload and insert";
+    }
+  });
+  return () => {
+    if (busy) {
+      dialog.showModal();
+      return;
+    }
+    target = capture();
+    job = null;
+    form.querySelector("fieldset").disabled = false;
+    submit.textContent = "Upload and insert";
+    input.click();
+  };
+}
+
 // node_modules/marked/lib/marked.esm.js
 function v() {
   return { async: false, breaks: false, extensions: null, gfm: true, hooks: null, pedantic: false, renderer: null, silent: false, tokenizer: null, walkTokens: null };
@@ -59,7 +348,7 @@ var Ue = /^\\([!"#$%&'()*+,\-./:;<=>?@\[\]\\^_`{|}~])/;
 var Ke = /^(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/;
 var Re = /^( {2,}|\\)\n(?!\s*$)[ \t]*/;
 var We = /^(`+|[^`])(?:(?= {2,}\n)|[\s\S]*?(?:(?=[\\<!\[`*_]|\b_|$)|[^ ](?= {2,}\n)))/;
-var $ = /[\p{P}\p{S}]/u;
+var $2 = /[\p{P}\p{S}]/u;
 var H = /[\s\p{P}\p{S}]/u;
 var W = /[^\s\p{P}\p{S}]/u;
 var Xe = c(/^((?![*_])punctSpace)/, "u").replace(/punctSpace/g, H).getRegex();
@@ -69,23 +358,23 @@ var Je = /(?!~)[\s\p{P}\p{S}]/u;
 var Ye = /(?:[^\s\p{P}\p{S}]|~)/u;
 var et = c(/link|precode-code|html/, "g").replace("link", /\[(?:[^\[\]`]|(?<a>`+)[^`]+\k<a>(?!`))*?\]\((?:\\[\s\S]|[^\\\(\)]|\((?:\\[\s\S]|[^\\\(\)])*\))*\)/).replace("precode-", Me ? "(?<!`)()" : "(^^|[^`])").replace("code", /(?<b>`+)[^`]+\k<b>(?!`)/).replace("html", /<(?! )[^<>]*?>/).getRegex();
 var Oe = /^(?:\*+(?:((?!\*)punct)|([^\s*]))?)|^_+(?:((?!_)punct)|([^\s_]))?/;
-var tt = c(Oe, "u").replace(/punct/g, $).getRegex();
+var tt = c(Oe, "u").replace(/punct/g, $2).getRegex();
 var nt = c(Oe, "u").replace(/punct/g, Te).getRegex();
 var rt = /^(?:\*+(?:((?!\*)(?!openQuote)punct)|([^\s*]))?)|^_+(?:((?!_)(?!openQuote)punct)|([^\s_]))?/;
-var st = c(rt, "u").replace(/openQuote/g, Ve).replace(/punct/g, $).getRegex();
+var st = c(rt, "u").replace(/openQuote/g, Ve).replace(/punct/g, $2).getRegex();
 var we = "^[^_*]*?__[^_*]*?\\*[^_*]*?(?=__)|[^*]+(?=[^*])|(?!\\*)punct(\\*+)(?=[\\s]|$)|notPunctSpace(\\*+)(?!\\*)(?=punctSpace|$)|(?!\\*)punctSpace(\\*+)(?=notPunctSpace)|[\\s](\\*+)(?!\\*)(?=punct)|(?!\\*)punct(\\*+)(?!\\*)(?=punct)|notPunctSpace(\\*+)(?=notPunctSpace)";
-var it = c(we, "gu").replace(/notPunctSpace/g, W).replace(/punctSpace/g, H).replace(/punct/g, $).getRegex();
+var it = c(we, "gu").replace(/notPunctSpace/g, W).replace(/punctSpace/g, H).replace(/punct/g, $2).getRegex();
 var ot = c(we, "gu").replace(/notPunctSpace/g, Ye).replace(/punctSpace/g, Je).replace(/punct/g, Te).getRegex();
 var at = "^[^_*]*?__[^_*]*?\\*[^_*]*?(?=__)|[^*]+(?=[^*])|(?!\\*)punct(\\*+)(?=[\\s]|$)|notPunctSpace(\\*+)(?!\\*)(?=punctSpace|$)|(?!\\*)[\\s](\\*+)(?=notPunctSpace)|[\\s](\\*+)(?!\\*)(?=punct)|(?!\\*)punct(\\*+)(?!\\*)(?=punct)|(?:(?!\\*)punct|notPunctSpace)(\\*+)(?!\\*)(?=notPunctSpace)";
-var lt = c(at, "gu").replace(/notPunctSpace/g, W).replace(/punctSpace/g, H).replace(/punct/g, $).getRegex();
-var ut = c("^[^_*]*?\\*\\*[^_*]*?_[^_*]*?(?=\\*\\*)|[^_]+(?=[^_])|(?!_)punct(_+)(?=[\\s]|$)|notPunctSpace(_+)(?!_)(?=punctSpace|$)|(?!_)punctSpace(_+)(?=notPunctSpace)|[\\s](_+)(?!_)(?=punct)|(?!_)punct(_+)(?!_)(?=punct)", "gu").replace(/notPunctSpace/g, W).replace(/punctSpace/g, H).replace(/punct/g, $).getRegex();
+var lt = c(at, "gu").replace(/notPunctSpace/g, W).replace(/punctSpace/g, H).replace(/punct/g, $2).getRegex();
+var ut = c("^[^_*]*?\\*\\*[^_*]*?_[^_*]*?(?=\\*\\*)|[^_]+(?=[^_])|(?!_)punct(_+)(?=[\\s]|$)|notPunctSpace(_+)(?!_)(?=punctSpace|$)|(?!_)punctSpace(_+)(?=notPunctSpace)|[\\s](_+)(?!_)(?=punct)|(?!_)punct(_+)(?!_)(?=punct)", "gu").replace(/notPunctSpace/g, W).replace(/punctSpace/g, H).replace(/punct/g, $2).getRegex();
 var pt = "^[^_*]*?\\*\\*[^_*]*?_[^_*]*?(?=\\*\\*)|[^_]+(?=[^_])|(?!_)punct(_+)(?=[\\s]|$)|notPunctSpace(_+)(?!_)(?=punctSpace|$)|(?!_)[\\s](_+)(?=notPunctSpace)|[\\s](_+)(?!_)(?=punct)|(?!_)punct(_+)(?!_)(?=punct)|(?:(?!_)punct|notPunctSpace)(_+)(?!_)(?=notPunctSpace)";
-var ct = c(pt, "gu").replace(/notPunctSpace/g, W).replace(/punctSpace/g, H).replace(/punct/g, $).getRegex();
-var ht = c(/^~~?(?:((?!~)punct)|[^\s~])/, "u").replace(/punct/g, $).getRegex();
+var ct = c(pt, "gu").replace(/notPunctSpace/g, W).replace(/punctSpace/g, H).replace(/punct/g, $2).getRegex();
+var ht = c(/^~~?(?:((?!~)punct)|[^\s~])/, "u").replace(/punct/g, $2).getRegex();
 var dt = "^[^~]+(?=[^~])|(?!~)punct(~~?)(?=[\\s]|$)|notPunctSpace(~~?)(?!~)(?=punctSpace|$)|(?!~)punctSpace(~~?)(?=notPunctSpace)|[\\s](~~?)(?!~)(?=punct)|(?!~)punct(~~?)(?!~)(?=punct)|notPunctSpace(~~?)(?=notPunctSpace)";
-var kt = c(dt, "gu").replace(/notPunctSpace/g, W).replace(/punctSpace/g, H).replace(/punct/g, $).getRegex();
-var gt = c(/\\(punct)/, "gu").replace(/punct/g, $).getRegex();
-var ft = c(/(`+)(?:[^`]|[^`][\s\S]*?[^`])\1(?!`)|`+|\\(punct)/, "gu").replace(/punct/g, $).getRegex();
+var kt = c(dt, "gu").replace(/notPunctSpace/g, W).replace(/punctSpace/g, H).replace(/punct/g, $2).getRegex();
+var gt = c(/\\(punct)/, "gu").replace(/punct/g, $2).getRegex();
+var ft = c(/(`+)(?:[^`]|[^`][\s\S]*?[^`])\1(?!`)|`+|\\(punct)/, "gu").replace(/punct/g, $2).getRegex();
 var mt = c(/^<(scheme:[^\s\x00-\x1f<>]*|email)>/).replace("scheme", /[a-zA-Z][a-zA-Z0-9+.-]{1,31}/).replace("email", /[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+(@)[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+(?![-_])/).getRegex();
 var xt = c(ie).replace("(?:-->|$)", "-->").getRegex();
 var bt = c("^comment|^</[a-zA-Z][a-zA-Z0-9-]*\\s*>|^<[a-zA-Z][a-zA-Z0-9-]*(?:attribute)*?\\s*/?>|^<\\?[\\s\\S]*?\\?>|^<![a-zA-Z]+\\s[\\s\\S]*?>|^<!\\[CDATA\\[[\\s\\S]*?\\]\\]>").replace("comment", xt).replace("attribute", /\s+[a-zA-Z:_][\w.:-]*(?:\s*=\s*"[^"]*"|\s*=\s*'[^']*'|\s*=\s*[^\s"'=<>`]+)?/).getRegex();
@@ -5080,9 +5369,9 @@ async function mountYouTubePlayers(root2) {
     return record;
   });
   if (!pending.length) return;
-  let api;
+  let api2;
   try {
-    api = await loadYouTubeAPI();
+    api2 = await loadYouTubeAPI();
   } catch (error) {
     pending.forEach((record) => {
       if (players.get(record.frame) === record) players.delete(record.frame);
@@ -5097,7 +5386,7 @@ async function mountYouTubePlayers(root2) {
       continue;
     }
     frame.src = frame.dataset.youtubeSrc;
-    record.player = new api.Player(frame, {
+    record.player = new api2.Player(frame, {
       events: {
         onReady(event) {
           if (players.get(frame) === record && frame.isConnected) event.target.mute();
@@ -5458,9 +5747,9 @@ function editorPath(path) {
 }
 
 // src/app.js
-var $2 = (selector) => document.querySelector(selector);
-var body = $2("#writing-body");
-var titleInput = $2("#entry-title");
+var $3 = (selector) => document.querySelector(selector);
+var body = $3("#writing-body");
+var titleInput = $3("#entry-title");
 var entries2 = /* @__PURE__ */ new Map();
 var assets = /* @__PURE__ */ new Map();
 var urls = /* @__PURE__ */ new Map();
@@ -5486,11 +5775,11 @@ var titleFor = (entry) => entry.title.trim() || (entry.id === HOME_ID ? "Home" :
 var currentEntry = () => activeId === HOME_ID ? homeEntry : entries2.get(activeId);
 function notice(message, error = false) {
   clearTimeout(noticeTimer);
-  $2("#notice").textContent = message;
-  $2("#notice").hidden = false;
-  $2("#notice").dataset.error = error;
+  $3("#notice").textContent = message;
+  $3("#notice").hidden = false;
+  $3("#notice").dataset.error = error;
   noticeTimer = setTimeout(() => {
-    $2("#notice").hidden = true;
+    $3("#notice").hidden = true;
   }, error ? 9e3 : 4500);
 }
 function openDB() {
@@ -5662,7 +5951,7 @@ ${kind === "youtube" ? ref : kind === "image" ? `![${label}](${ref})` : `[Video:
   }
 });
 function saveEditor() {
-  if (!editorAuthorized || !activeId || activeId === deletingId || $2("#editor-shell")?.hidden) return;
+  if (!editorAuthorized || !activeId || activeId === deletingId || $3("#editor-shell")?.hidden) return;
   ensureTrailingTextLine(body);
   const entry = currentEntry();
   entry.title = titleInput.value;
@@ -5679,33 +5968,33 @@ function removeMedia(media) {
 }
 function renderNavigation() {
   if (body) {
-    if (activeId === HOME_ID) $2("#editor-home").setAttribute("aria-current", "page");
-    else $2("#editor-home").removeAttribute("aria-current");
-    $2("#import-markdown").textContent = activeId === HOME_ID ? "Import Home Markdown\u2026" : "Import Markdown\u2026";
-    $2("#editor-pages").replaceChildren();
+    if (activeId === HOME_ID) $3("#editor-home").setAttribute("aria-current", "page");
+    else $3("#editor-home").removeAttribute("aria-current");
+    $3("#import-markdown").textContent = activeId === HOME_ID ? "Import Home Markdown\u2026" : "Import Markdown\u2026";
+    $3("#editor-pages").replaceChildren();
   }
-  $2(".page-shelf nav").replaceChildren();
-  $2(".all-pages").replaceChildren();
+  $3(".page-shelf nav").replaceChildren();
+  $3(".all-pages").replaceChildren();
   for (const entry of entries2.values()) {
     const link = document.createElement("a");
     link.href = `/editor/${entry.id}`;
     link.dataset.id = entry.id;
     link.textContent = titleFor(entry);
     if (activeId === entry.id) link.setAttribute("aria-current", "page");
-    $2("#editor-pages")?.append(link);
+    $3("#editor-pages")?.append(link);
     const publicLink = document.createElement("a");
     publicLink.href = `/page/${entry.id}`;
     publicLink.dataset.page = entry.id;
     publicLink.textContent = titleFor(entry);
-    if ($2(".page-shelf nav").childElementCount < 8) $2(".page-shelf nav").append(publicLink.cloneNode(true));
+    if ($3(".page-shelf nav").childElementCount < 8) $3(".page-shelf nav").append(publicLink.cloneNode(true));
     const li = document.createElement("li");
     li.append(publicLink);
-    $2(".all-pages").append(li);
+    $3(".all-pages").append(li);
   }
 }
 function updateHome() {
-  $2("#home-title").textContent = titleFor(homeEntry);
-  $2("#home-content").replaceChildren(renderMarkdown(homeEntry.markdown));
+  $3("#home-title").textContent = titleFor(homeEntry);
+  $3("#home-content").replaceChildren(renderMarkdown(homeEntry.markdown));
 }
 function migrateLegacyURL() {
   const path = location.hash ? gardenPath(location.hash) : null;
@@ -5721,13 +6010,13 @@ function migrateLegacyURL() {
 }
 async function checkEditorAccess() {
   const session = await readEditorSession();
-  if (session) $2("#sign-out-csrf").value = session.csrf;
+  if (session) $3("#sign-out-csrf").value = session.csrf;
   return !!session;
 }
 function lockEditor() {
   editorAuthorized = false;
   if (body) {
-    $2("#editor-shell").hidden = true;
+    $3("#editor-shell").hidden = true;
     body.contentEditable = "false";
     titleInput.disabled = true;
   }
@@ -5746,7 +6035,7 @@ async function route(focus = false) {
   }
   if (editing) {
     editorAuthorized = false;
-    $2("#editor-shell").hidden = true;
+    $3("#editor-shell").hidden = true;
     const allowed = await checkEditorAccess();
     if (revision2 !== routeRevision) return;
     if (!allowed) {
@@ -5761,22 +6050,22 @@ async function route(focus = false) {
   unmountYouTubePlayers();
   document.querySelectorAll('[data-media-kind="youtube"] iframe').forEach((player) => player.remove());
   body?.querySelectorAll("video").forEach((video) => video.pause());
-  $2("#page-content").querySelectorAll("video").forEach((video) => video.pause());
-  $2("#home-content").querySelectorAll("video").forEach((video) => video.pause());
+  $3("#page-content").querySelectorAll("video").forEach((video) => video.pause());
+  $3("#home-content").querySelectorAll("video").forEach((video) => video.pause());
   const id = editing ? path.slice(8) : path.startsWith("/page/") ? path.slice(6) : "";
-  $2(".site").hidden = editing;
-  if (body) $2("#editor-shell").hidden = !editing;
+  $3(".site").hidden = editing;
+  if (body) $3("#editor-shell").hidden = !editing;
   if (editing) {
     activeId = !id || id === "home" ? HOME_ID : entries2.has(id) ? id : entries2.keys().next().value || HOME_ID;
     const entry = currentEntry();
-    $2("#delete-entry").hidden = activeId === HOME_ID;
-    $2("#editor-document").hidden = !entry;
-    $2("#editor-empty").hidden = !!entry;
+    $3("#delete-entry").hidden = activeId === HOME_ID;
+    $3("#editor-document").hidden = !entry;
+    $3("#editor-empty").hidden = !!entry;
     titleInput.value = entry?.title || "";
     body.replaceChildren(entry ? renderMarkdown(entry.markdown, true) : document.createDocumentFragment());
     savedRange = null;
     setBlockFormat("p");
-    $2("#preview-entry").href = activeId === HOME_ID ? "/" : entry ? `/page/${activeId}` : "/";
+    $3("#preview-entry").href = activeId === HOME_ID ? "/" : entry ? `/page/${activeId}` : "/";
     document.title = entry ? `${titleFor(entry)} \u2014 Local editor` : "Local editor \u2014 Peter";
   } else {
     activeId = null;
@@ -5786,27 +6075,27 @@ async function route(focus = false) {
       section.hidden = section.id !== `${view}-view`;
     });
     if (entry) {
-      $2("#page-title").textContent = titleFor(entry);
-      $2("#page-content").replaceChildren(renderMarkdown(entry.markdown));
+      $3("#page-title").textContent = titleFor(entry);
+      $3("#page-content").replaceChildren(renderMarkdown(entry.markdown));
       const related = entries2.get(entry.related) || [...entries2.values()].find((item) => item.id !== entry.id);
-      $2(".page-connections").hidden = !related;
+      $3(".page-connections").hidden = !related;
       if (related) {
-        $2("#related-page").textContent = titleFor(related);
-        $2("#related-page").href = `/page/${related.id}`;
+        $3("#related-page").textContent = titleFor(related);
+        $3("#related-page").href = `/page/${related.id}`;
       }
     }
     document.title = `${entry ? titleFor(entry) : view === "pages" ? "All Pages" : titleFor(homeEntry)} \u2014 Peter`;
     if (view === "home") updateHome();
   }
   renderNavigation();
-  mountYouTubePlayers(editing ? body : $2("#home-view").hidden ? $2("#page-content") : $2("#home-content")).catch((error) => notice(error.message, true));
+  mountYouTubePlayers(editing ? body : $3("#home-view").hidden ? $3("#page-content") : $3("#home-content")).catch((error) => notice(error.message, true));
   document.querySelectorAll("[data-page]").forEach((link) => {
     if (link.dataset.page === (entries2.has(id) ? id : path === "/pages" ? "pages" : "home")) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   });
   if (focus) {
     window.scrollTo(0, 0);
-    if (!editing) $2("#main").focus({ preventScroll: true });
+    if (!editing) $3("#main").focus({ preventScroll: true });
   }
 }
 function rememberSelection() {
@@ -5833,8 +6122,8 @@ function restoreSelection() {
 }
 function setBlockFormat(value) {
   const labels = { p: "Text", h2: "Heading", h3: "Small heading" };
-  $2("#block-format").dataset.value = value;
-  $2("#block-format-label").textContent = labels[value];
+  $3("#block-format").dataset.value = value;
+  $3("#block-format-label").textContent = labels[value];
   document.querySelectorAll("[data-block]").forEach((button) => button.setAttribute("aria-checked", String(button.dataset.block === value)));
 }
 function syncBlockFormat() {
@@ -5845,25 +6134,25 @@ function syncBlockFormat() {
   setBlockFormat(element.closest("h2,h3")?.tagName.toLowerCase() || "p");
 }
 function closeBlockMenu(returnFocus = false) {
-  const menu = $2("#block-format-menu");
+  const menu = $3("#block-format-menu");
   if (!menu || menu.hidden) return;
   menu.hidden = true;
-  $2("#block-format").setAttribute("aria-expanded", "false");
-  if (returnFocus) $2("#block-format").focus({ preventScroll: true });
+  $3("#block-format").setAttribute("aria-expanded", "false");
+  if (returnFocus) $3("#block-format").focus({ preventScroll: true });
 }
 function showBlockMenu(edge) {
   pageReferencePicker?.close();
   closeWritingMenu();
   rememberSelection();
   syncBlockFormat();
-  $2("#block-format-menu").hidden = false;
-  $2("#block-format").setAttribute("aria-expanded", "true");
+  $3("#block-format-menu").hidden = false;
+  $3("#block-format").setAttribute("aria-expanded", "true");
   const choices = [...document.querySelectorAll("[data-block]")];
   const target = edge === "first" ? choices[0] : edge === "last" ? choices.at(-1) : choices.find((button) => button.getAttribute("aria-checked") === "true");
   target.focus({ preventScroll: true });
 }
 function closeWritingMenu(returnFocus = false) {
-  const menu = $2("#writing-menu");
+  const menu = $3("#writing-menu");
   if (!menu || menu.hidden) return;
   menu.hidden = true;
   if (returnFocus) restoreSelection();
@@ -5872,7 +6161,7 @@ function showWritingMenu(event) {
   pageReferencePicker?.close();
   event.preventDefault();
   closeBlockMenu();
-  const menu = $2("#writing-menu");
+  const menu = $3("#writing-menu");
   let range;
   const fromKeyboard = event.clientX === 0 && event.clientY === 0;
   if (!fromKeyboard) {
@@ -5916,7 +6205,8 @@ function showWritingMenu(event) {
   const y2 = fromKeyboard ? keyboardY : event.clientY;
   menu.style.left = `${Math.max(8, Math.min(x2, window.innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y2, window.innerHeight - menu.offsetHeight - 8))}px`;
-  menu.querySelector("button").focus({ preventScroll: true });
+  menu.tabIndex = -1;
+  (fromKeyboard ? menu.querySelector("button") : menu).focus({ preventScroll: true });
 }
 function insertNode(node) {
   restoreSelection();
@@ -5957,15 +6247,15 @@ function showInsert(mode) {
   rememberSelection();
   insertMode = mode;
   const selection = window.getSelection().toString();
-  $2("#insert-form").reset();
-  $2("#insert-error").textContent = "";
-  $2("#insert-title").textContent = mode === "youtube" ? "Add a YouTube video" : "Add a link";
-  $2("#url-label").textContent = mode === "youtube" ? "YouTube URL" : "URL or garden page link";
-  $2("#caption-label").hidden = $2("#insert-caption").hidden = mode === "youtube";
-  $2("#insert-caption").value = selection;
-  $2("#insert-help").textContent = mode === "youtube" ? "Paste a YouTube link to preview it here." : "Use https://example.com or a garden link such as /page/note.";
-  $2("#insert-dialog").showModal();
-  $2("#insert-url").focus();
+  $3("#insert-form").reset();
+  $3("#insert-error").textContent = "";
+  $3("#insert-title").textContent = mode === "youtube" ? "Add a YouTube video" : "Add a link";
+  $3("#url-label").textContent = mode === "youtube" ? "YouTube URL" : "URL or garden page link";
+  $3("#caption-label").hidden = $3("#insert-caption").hidden = mode === "youtube";
+  $3("#insert-caption").value = selection;
+  $3("#insert-help").textContent = mode === "youtube" ? "Paste a YouTube link to preview it here." : "Use https://example.com or a garden link such as /page/note.";
+  $3("#insert-dialog").showModal();
+  $3("#insert-url").focus();
 }
 async function addFiles(files, kind) {
   if (!editorAuthorized) return;
@@ -5989,7 +6279,7 @@ async function addFiles(files, kind) {
     try {
       await writeRecords("assets", [asset]);
       assets.set(path, asset);
-      if (activeId !== owner || $2("#editor-shell").hidden) {
+      if (activeId !== owner || $3("#editor-shell").hidden) {
         notice("The page changed before the file was inserted. Select it again in the intended page.");
         return;
       }
@@ -6055,7 +6345,7 @@ async function deleteCurrentEntry() {
   const id = activeId;
   if (!id || id === HOME_ID || !entries2.has(id) || deletingId) return;
   deletingId = id;
-  $2("#delete-entry").disabled = true;
+  $3("#delete-entry").disabled = true;
   pendingWrites++;
   try {
     await writeRecords("entries", [{ id, deleted: true }]);
@@ -6064,14 +6354,14 @@ async function deleteCurrentEntry() {
       const nextId = entries2.keys().next().value;
       history.replaceState(null, "", nextId ? `/editor/${nextId}` : "/editor");
       await route(true);
-    } else if ($2("#editor-shell").hidden) route();
+    } else if ($3("#editor-shell").hidden) route();
     else renderNavigation();
   } catch {
     notice("Could not delete this page. It has been kept.", true);
   } finally {
     pendingWrites--;
     deletingId = null;
-    $2("#delete-entry").disabled = false;
+    $3("#delete-entry").disabled = false;
   }
 }
 async function importFile(file) {
@@ -6149,7 +6439,7 @@ function bindEvents() {
     if (!link || link.hasAttribute("download") || link.target && link.target !== "_self") return;
     if (link.classList.contains("skip-link")) {
       event.preventDefault();
-      (body && !$2("#editor-shell").hidden ? body : $2("#main")).focus();
+      (body && !$3("#editor-shell").hidden ? body : $3("#main")).focus();
       return;
     }
     const url = new URL(link.href, location.href);
@@ -6172,7 +6462,7 @@ function bindEvents() {
   document.execCommand("defaultParagraphSeparator", false, "p");
   pageReferencePicker = createPageReferencePicker({
     editor: body,
-    menu: $2("#page-reference-menu"),
+    menu: $3("#page-reference-menu"),
     getPages: () => [
       { id: HOME_ID, title: titleFor(homeEntry), href: "/" },
       ...[...entries2.values()].filter((entry) => !entry.deleted).map((entry) => ({ id: entry.id, title: titleFor(entry), href: `/page/${entry.id}` }))
@@ -6200,13 +6490,13 @@ function bindEvents() {
   document.addEventListener("visibilitychange", recheckSession);
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) {
-      $2("#editor-shell").inert = false;
+      $3("#editor-shell").inert = false;
       route();
     }
   });
   window.setInterval(recheckSession, 6e4);
   let signingOut = false;
-  $2("#sign-out").addEventListener("submit", async (event) => {
+  $3("#sign-out").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (signingOut) return;
     signingOut = true;
@@ -6216,21 +6506,21 @@ function bindEvents() {
       return;
     }
     editorAuthorized = false;
-    $2("#editor-shell").inert = true;
-    $2("#sign-out").submit();
+    $3("#editor-shell").inert = true;
+    $3("#sign-out").submit();
   });
   document.addEventListener("selectionchange", () => {
     rememberSelection();
-    if ($2("#block-format-menu").hidden) syncBlockFormat();
+    if ($3("#block-format-menu").hidden) syncBlockFormat();
   });
-  const blockPicker = $2("#block-format-picker");
-  const blockMenu = $2("#block-format-menu");
+  const blockPicker = $3("#block-format-picker");
+  const blockMenu = $3("#block-format-menu");
   blockPicker.addEventListener("mousedown", (event) => event.preventDefault());
-  $2("#block-format").addEventListener("click", () => {
+  $3("#block-format").addEventListener("click", () => {
     if (blockMenu.hidden) showBlockMenu();
     else closeBlockMenu(true);
   });
-  $2("#block-format").addEventListener("keydown", (event) => {
+  $3("#block-format").addEventListener("keydown", (event) => {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       showBlockMenu(event.key === "ArrowDown" ? "first" : "last");
@@ -6267,17 +6557,33 @@ function bindEvents() {
   window.addEventListener("resize", () => closeBlockMenu());
   window.addEventListener("blur", () => closeBlockMenu());
   body.addEventListener("contextmenu", showWritingMenu);
-  const writingMenu = $2("#writing-menu");
+  const openYouTubeUpload = bindYouTubeUpload({
+    capture() {
+      rememberSelection();
+      return { owner: activeId, range: savedRange?.cloneRange() };
+    },
+    insert(target, url) {
+      if (!editorAuthorized || activeId !== target.owner || $3("#editor-shell").hidden || !target.range || !body.contains(target.range.commonAncestorContainer)) return false;
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(target.range);
+      savedRange = target.range.cloneRange();
+      insertNode(mediaBlock("youtube", url, "", true));
+      return true;
+    }
+  });
+  const writingMenu = $3("#writing-menu");
   writingMenu.addEventListener("mousedown", (event) => event.preventDefault());
   writingMenu.addEventListener("click", (event) => {
     const button = event.target.closest("[data-insert]");
     if (!button) return;
     closeWritingMenu(true);
     const kind = button.dataset.insert;
-    if (kind === "youtube") showInsert("youtube");
+    if (kind === "youtube-upload") openYouTubeUpload();
+    else if (kind === "youtube") showInsert("youtube");
     else if (kind === "image" || kind === "video") {
       rememberSelection();
-      $2(`#${kind}-file`).click();
+      $3(`#${kind}-file`).click();
     }
   });
   writingMenu.addEventListener("keydown", (event) => {
@@ -6285,7 +6591,7 @@ function bindEvents() {
     const index = buttons.indexOf(document.activeElement);
     if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
       event.preventDefault();
-      const next2 = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+      const next2 = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : index < 0 ? event.key === "ArrowDown" ? 0 : buttons.length - 1 : (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
       buttons[next2].focus();
     } else if (event.key === "Escape" || event.key === "Tab") {
       event.preventDefault();
@@ -6362,21 +6668,21 @@ function bindEvents() {
       saveEditor();
     });
   });
-  $2("#cancel-insert").addEventListener("click", () => $2("#insert-dialog").close());
-  $2("#insert-form").addEventListener("submit", (event) => {
+  $3("#cancel-insert").addEventListener("click", () => $3("#insert-dialog").close());
+  $3("#insert-form").addEventListener("submit", (event) => {
     event.preventDefault();
-    const url = $2("#insert-url").value.trim();
+    const url = $3("#insert-url").value.trim();
     if (insertMode === "youtube" ? !youtubeID(url) : !safeURL(url)) {
-      $2("#insert-error").textContent = insertMode === "youtube" ? "Enter a YouTube watch, short, or youtu.be URL." : "Use an https://, http://, mailto:, or /page/ URL.";
+      $3("#insert-error").textContent = insertMode === "youtube" ? "Enter a YouTube watch, short, or youtu.be URL." : "Use an https://, http://, mailto:, or /page/ URL.";
       return;
     }
-    $2("#insert-dialog").close();
+    $3("#insert-dialog").close();
     if (insertMode === "youtube") insertNode(mediaBlock("youtube", url, "", true));
     else {
       restoreSelection();
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.textContent = $2("#insert-caption").value.trim() || url;
+      anchor.textContent = $3("#insert-caption").value.trim() || url;
       const selection = window.getSelection(), range = selection.getRangeAt(0);
       range.deleteContents();
       range.insertNode(anchor);
@@ -6389,20 +6695,20 @@ function bindEvents() {
     }
   });
   for (const kind of ["image", "video"]) {
-    $2(`#${kind}-file`).addEventListener("change", (event) => {
+    $3(`#${kind}-file`).addEventListener("change", (event) => {
       addFiles([...event.target.files], kind);
       event.target.value = "";
     });
   }
-  $2("#new-entry").addEventListener("click", () => createEntry());
-  $2("#delete-entry").addEventListener("click", deleteCurrentEntry);
-  $2("#import-markdown").addEventListener("click", () => $2("#markdown-file").click());
-  $2("#markdown-file").addEventListener("change", (event) => {
+  $3("#new-entry").addEventListener("click", () => createEntry());
+  $3("#delete-entry").addEventListener("click", deleteCurrentEntry);
+  $3("#import-markdown").addEventListener("click", () => $3("#markdown-file").click());
+  $3("#markdown-file").addEventListener("change", (event) => {
     importFile(event.target.files[0]);
     event.target.value = "";
   });
-  $2("#export-markdown").addEventListener("click", () => exportEntry(false));
-  $2("#export-bundle").addEventListener("click", () => exportEntry(true));
+  $3("#export-markdown").addEventListener("click", () => exportEntry(false));
+  $3("#export-bundle").addEventListener("click", () => exportEntry(true));
 }
 async function boot() {
   try {

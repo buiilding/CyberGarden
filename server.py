@@ -2,6 +2,7 @@
 
 from functools import partial
 import html
+import hmac
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -11,6 +12,8 @@ from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 from auth import AuthError, AuthService, Config, EDITOR_ROUTE, FLOW_COOKIE, FLOW_SECONDS, SESSION_COOKIE, SESSION_SECONDS, load_local_env
 
+from youtube_upload import YouTubeService, YouTubeError
+
 ROOT = Path(__file__).resolve().parent
 PUBLIC_ROUTE = re.compile(r"/|/pages/?|/page/[A-Za-z0-9_-]+/?")
 STATIC = {"/style.css": "text/css", "/script.js": "text/javascript", "/sample.svg": "image/svg+xml",
@@ -18,8 +21,9 @@ STATIC = {"/style.css": "text/css", "/script.js": "text/javascript", "/sample.sv
 
 
 class GardenHandler(BaseHTTPRequestHandler):
-    def __init__(self, *args, auth, **kwargs):
+    def __init__(self, *args, auth, youtube, **kwargs):
         self.auth = auth
+        self.youtube = youtube
         super().__init__(*args, **kwargs)
 
     def log_message(self, format, *args):
@@ -39,8 +43,8 @@ class GardenHandler(BaseHTTPRequestHandler):
         # Native same-origin form POSTs need their real Origin for CSRF checks.
         # no-referrer would make Chrome send Origin: null. Callback codes still
         # receive no-referrer so the one-time code cannot become a Referer.
-        callback = unquote(urlsplit(self.path).path) == "/auth/callback"
-        self.send_header("Referrer-Policy", "no-referrer" if callback else "same-origin")
+        callback = unquote(urlsplit(self.path).path) in {"/auth/callback", "/youtube/callback"}
+        self.send_header("Referrer-Policy", "no-referrer" if callback else "same-origin" if urlsplit(self.path).path.startswith("/auth/") else "strict-origin-when-cross-origin")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Security-Policy", "frame-ancestors 'none'; base-uri 'self'")
@@ -88,7 +92,24 @@ class GardenHandler(BaseHTTPRequestHandler):
             return
         path = unquote(urlsplit(self.path).path)
         query = parse_qs(urlsplit(self.path).query)
-        if path == "/auth/login":
+        if path == "/youtube/callback":
+            try:
+                session_id = self.cookie(SESSION_COOKIE)
+                session = self.auth.validate(session_id)
+                self.youtube.finish(session_id, session, query.get("state", [""])[0], query.get("code", [""])[0])
+                self.redirect("/youtube/connected")
+            except (AuthError, YouTubeError) as error:
+                self.reply(getattr(error, "status", 400), self.page("YouTube connection", '<p>Connection was not completed. Close this window and try connecting YouTube again in the editor.</p>'))
+        elif path == "/youtube/connected":
+            self.reply(200, self.page("YouTube connected", '<p>Connected. You can close this window and return to the upload dialog.</p>'))
+        elif path == "/youtube/status":
+            try:
+                session = self.auth.validate(self.cookie(SESSION_COOKIE))
+                connection = session.get("youtube", {})
+                self.reply(200, json.dumps({"configured": self.youtube.configured, "connected": bool(connection), "channel": connection.get("channel_title", "")}), "application/json")
+            except AuthError as error:
+                self.reply(error.status, '{"error":"Sign in to the editor again."}', "application/json")
+        elif path == "/auth/login":
             if not self.auth.config.configured:
                 self.error_page(503, "Google sign-in needs local configuration. Set SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, and OWNER_EMAIL_ALLOWLIST in .env.local, then restart npm start. See README.md.")
                 return
@@ -149,19 +170,42 @@ class GardenHandler(BaseHTTPRequestHandler):
             return
         path = urlsplit(self.path).path
         try:
-            if path == "/auth/login":
+            if path.startswith("/youtube/"):
+                session_id = self.cookie(SESSION_COOKIE)
+                session = self.auth.validate(session_id)
+                if not hmac.compare_digest(session["csrf"].encode(), form.get("csrf", [""])[0].encode()):
+                    raise AuthError(403)
+                if path == "/youtube/connect":
+                    result = {"url": self.youtube.begin(session_id)}
+                elif path == "/youtube/token":
+                    result = {"access_token": self.youtube.access(session, force=form.get("refresh", [""])[0] == "true")}
+                elif path == "/youtube/video":
+                    result = self.youtube.video(session, form.get("id", [""])[0])
+                elif path == "/youtube/disconnect":
+                    session.pop("youtube", None)
+                    result = {"connected": False}
+                else:
+                    self.reply(404, "Not found", "text/plain")
+                    return
+                self.reply(200, json.dumps(result), "application/json")
+            elif path == "/auth/login":
                 self.redirect(self.auth.begin(self.cookie(FLOW_COOKIE), form.get("csrf", [""])[0]))
             elif path == "/auth/logout":
                 self.auth.logout(self.cookie(SESSION_COOKIE), form.get("csrf", [""])[0])
                 self.redirect("/", [self.cookie_header(SESSION_COOKIE, "", 0)])
             else:
                 self.reply(404, "Not found", "text/plain")
+        except YouTubeError as error:
+            self.reply(error.status, json.dumps({"error": str(error)}), "application/json")
         except AuthError as error:
+            if path.startswith("/youtube/"):
+                self.reply(error.status, '{"error":"Sign in to the editor again."}', "application/json")
+                return
             self.error_page(error.status, "This sign-in request expired or was not allowed. Start sign-in again.")
 
 
 def make_server(config, address=("127.0.0.1", 4183)):
-    return ThreadingHTTPServer(address, partial(GardenHandler, auth=AuthService(config)))
+    return ThreadingHTTPServer(address, partial(GardenHandler, auth=AuthService(config), youtube=YouTubeService(config.origin)))
 
 
 if __name__ == "__main__":

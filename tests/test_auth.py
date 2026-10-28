@@ -197,7 +197,7 @@ class AuthHTTPTests(unittest.TestCase):
         self.assertIn('id="page-reference-menu"', body)
         self.assertIn('id="sign-out"', body)
         self.assertEqual(headers["Cache-Control"], "no-store")
-        self.assertEqual(headers["Referrer-Policy"], "same-origin")
+        self.assertEqual(headers["Referrer-Policy"], "strict-origin-when-cross-origin")
         self.assertGreater(self.provider.user_calls, before)
         status, _, body = self.request("/auth/session")
         self.assertEqual(status, 200)
@@ -266,6 +266,22 @@ class AuthHTTPTests(unittest.TestCase):
             status, _, body = self.request(path)
             self.assertEqual(status, 200)
             self.assertNotIn(self.auth.config.publishable_key, body)
+
+    def test_youtube_routes_require_owner_session_and_csrf(self):
+        self.assertEqual(self.request("/youtube/status")[0], 401)
+        self.assertEqual(self.request("/youtube/token", "POST", {"csrf": "forged"})[0], 401)
+        self.sign_in()
+        csrf = self.auth.sessions[self.cookies["cg_session"]]["csrf"]
+        for path in ("/youtube/connect", "/youtube/token", "/youtube/video", "/youtube/disconnect"):
+            self.assertEqual(self.request(path, "POST", {"csrf": "wrong"})[0], 403)
+            self.assertEqual(self.request(path, "POST", {"csrf": csrf}, origin="http://evil.example")[0], 403)
+        status, headers, content = self.request("/youtube/status")
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(content)["connected"])
+        self.assertNotIn("access_token", content)
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(self.request("/youtube/token", "POST", {"csrf": csrf})[0], 409)
+        self.assertEqual(self.request("/youtube/callback?state=forged&code=forged")[0], 400)
 
     def test_missing_configuration_locks_editor_and_return_path_cannot_escape(self):
         original = self.auth.config

@@ -34,10 +34,28 @@
 <div id="page-reference-menu" class="page-reference-menu" role="listbox" aria-label="Link to a page" hidden></div>
 <div id="writing-menu" class="writing-menu" role="menu" aria-label="Insert media" hidden>
   <button type="button" role="menuitem" data-insert="image" tabindex="-1">Add image</button>
-  <button type="button" role="menuitem" data-insert="video" tabindex="-1">Upload video</button>
-  <button type="button" role="menuitem" data-insert="youtube" tabindex="-1">YouTube URL</button>
+  <button type="button" role="menuitem" data-insert="youtube-upload" tabindex="-1">Upload video</button>
 </div>
 <dialog id="insert-dialog"><form id="insert-form"><h2 id="insert-title">Add a link</h2><label id="url-label" for="insert-url">URL</label><input id="insert-url" type="text" required autocomplete="off"><label id="caption-label" for="insert-caption">Link text</label><input id="insert-caption" type="text"><p id="insert-help"></p><p id="insert-error" role="alert"></p><div class="dialog-actions"><button type="button" id="cancel-insert">Cancel</button><button type="submit" class="primary-button">Insert</button></div></form></dialog>
 <input id="image-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/avif" hidden>
 <input id="video-file" type="file" accept="video/*" hidden>
 <input id="markdown-file" type="file" accept=".md,.markdown,.zip,text/markdown,application/zip" hidden>
+
+<input id="youtube-upload-file" type="file" accept="video/*" hidden>
+<dialog id="youtube-upload-dialog" aria-labelledby="youtube-upload-heading"><form id="youtube-upload-form">
+<h2 id="youtube-upload-heading">Upload to YouTube</h2>
+<p id="youtube-upload-filename"></p>
+<button id="youtube-connect" type="button">Connect YouTube</button>
+<fieldset>
+<label for="youtube-upload-title">Title</label><input id="youtube-upload-title" required>
+<label for="youtube-upload-description">Description (optional)</label><textarea id="youtube-upload-description" rows="3"></textarea>
+<label for="youtube-upload-visibility">Visibility</label><select id="youtube-upload-visibility"><option value="unlisted">Unlisted — anyone with the link</option><option value="public">Public</option><option value="private">Private — visitors cannot watch</option></select>
+<label for="youtube-upload-kids">Made for kids?</label><select id="youtube-upload-kids"><option value="no">No</option><option value="yes">Yes</option></select>
+</fieldset>
+<p id="youtube-upload-status" role="status" aria-live="polite"></p>
+<progress id="youtube-upload-progress" max="1" value="0" aria-label="Video upload progress" hidden></progress>
+<p id="youtube-upload-error" role="alert"></p>
+<p>By clicking 'upload,' you certify that the content you are uploading complies with the YouTube Terms of Service (including the YouTube Community Guidelines) at <a href="https://www.youtube.com/t/terms" target="_blank" rel="noopener">YouTube Terms of Service</a>. Please be sure not to violate others' copyright or privacy rights.</p>
+<p>Keep this window open while uploading. Cancel stops waiting or sending bytes; a video already uploaded stays on your YouTube channel.</p>
+<div class="dialog-actions"><button id="youtube-upload-cancel" type="button">Cancel</button><button id="youtube-upload-submit" type="submit" class="primary-button" disabled>Upload and insert</button></div>
+</form></dialog>
